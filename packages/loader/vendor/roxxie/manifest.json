@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "project": "Roxxie Proxy",
+  "note": "The proxy engine's service-worker half. The carrier's worker is the only worker a page has under the static deployment, so the engine has to be inside it; the site's own combined worker carries the same artifact for every other deployment.",
+  "engineVersion": "2.0.67-alpha.2",
+  "sourceCommit": "e9ff92d1ec98ba140cb4bca840fb40c2b9b52ebf",
+  "files": {
+    "controller.sw.js": "805309725993d31a8e540c20c575dcc176a86e7fdfc6b9d69ccf4ee8f94c736d"
+  }
+}

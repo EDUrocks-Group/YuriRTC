@@ -1,0 +1,43 @@
+[Unit]
+Description=YuriRTC content node (WebRTC data-channel origin)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yurirtc
+Group=yurirtc
+WorkingDirectory=/opt/yurirtc
+ExecStart=/opt/yurirtc/content-node
+
+# Binding 80 and 443 needs privilege, for both UDP and TCP. This is the only
+# capability the process needs; the 49152 fallback is unprivileged.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Shared UDP/TCP muxes remove listener descriptor and source-port exhaustion.
+# TCP-selected peers still own accepted sockets, so retain generous headroom.
+LimitNOFILE=1048576
+
+Environment=YURIRTC_ROOT=/var/lib/yurirtc/site
+Environment=YURIRTC_BACKEND=http://127.0.0.1:1801
+EnvironmentFile=/etc/yurirtc/node.env
+
+Restart=always
+RestartSec=2s
+
+# The service account JSON is a real secret; everything else is read-only.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/yurirtc/site /etc/yurirtc
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

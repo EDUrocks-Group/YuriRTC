@@ -1,0 +1,42 @@
+rules_version = '2';
+
+// YuriRTC's capability-scoped Firestore signaling leg is unauthenticated by
+// design. The companion RTDB leg uses anonymous Firebase Authentication.
+//
+// If both legs signed in, `identitytoolkit.googleapis.com` would be a shared
+// dependency and a filter blocking that one hostname would take out the whole
+// signaling layer — the second leg would buy nothing. Here the client's random
+// 128-bit document id *is* the authorisation.
+//
+// `allow get` without `allow list` is the entire trick: a document is readable
+// by whoever knows its id, while the collection stays unqueryable so nobody can
+// enumerate their way to other clients' offers.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /signal/{capability} {
+      // `.size()` on a string is its length; on a map it is the field count.
+      // Guarding with request.resource.size() would compare a two-field
+      // document against 16384 and always pass. Validate the offer field
+      // itself so the byte-sized signaling limit is actually enforced.
+      allow create: if request.resource.data.keys().hasOnly(['offer', 'expireAt'])
+                    && request.resource.data.keys().hasAll(['offer', 'expireAt'])
+                    && request.resource.data.offer is string
+                    && request.resource.data.offer.size() < 16384
+                    && request.resource.data.expireAt is timestamp
+                    && request.resource.data.expireAt > request.time
+                    && request.resource.data.expireAt < request.time + duration.value(10, 'm');
+
+      allow get: if true;
+      allow list: if false;
+
+      // Only the node (admin SDK, which bypasses these rules) writes `answer`
+      // or deletes. Denying client update removes any need for a field guard:
+      // if clients can only create, they can never write into `answer`.
+      allow update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

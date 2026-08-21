@@ -1,0 +1,28 @@
+{
+  "name": "learnmathedu",
+  "version": "2.1.8",
+  "description": "math",
+  "type": "module",
+  "main": "index.html",
+  "files": [
+    "index.html",
+    "sw.js"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "build:release": "node build.mjs --release",
+    "test": "node --test --test-concurrency=1 'test/*.test.mjs'",
+    "prepack": "npm run build:release",
+    "verify:package": "node verify-package.mjs"
+  },
+  "keywords": [
+    "webrtc"
+  ],
+  "author": "edurocks-group",
+  "license": "MIT",
+  "devDependencies": {
+    "html-minifier-terser": "^7.2.0",
+    "javascript-obfuscator": "^5.5.0",
+    "playwright-core": "1.62.1"
+  }
+}

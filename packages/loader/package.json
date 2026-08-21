@@ -1,0 +1,47 @@
+{
+  "name": "@edurocks-group/loader",
+  "version": "0.5.0",
+  "type": "module",
+  "description": "YuriRTC browser client and service worker transport. The package name is retained for deployed-client compatibility.",
+  "license": "AGPL-3.0-only",
+  "main": "./dist/bundle/client.js",
+  "types": "./dist/types/index.d.ts",
+  "files": [
+    "dist/bundle/client.js",
+    "dist/bundle/sw.js",
+    "dist/bundle/sw-stub.js",
+    "dist/types/index.d.ts",
+    "dist/assets/rot13.woff",
+    "dist/assets/OFL.txt"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "default": "./dist/bundle/client.js"
+    },
+    "./sw": {
+      "default": "./dist/bundle/sw.js"
+    },
+    "./sw-stub": {
+      "default": "./dist/bundle/sw-stub.js"
+    },
+    "./rot13.woff": "./dist/assets/rot13.woff",
+    "./dist/bundle/*": "./dist/bundle/*"
+  },
+  "scripts": {
+    "build": "node build.mjs --clean && tsc -p tsconfig.json && node build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test 'dist/test/*.test.js'",
+    "bundle": "node build.mjs",
+    "prepack": "npm run build",
+    "verify:package": "node verify-package.mjs"
+  },
+  "devDependencies": {
+    "@yurirtc/protocol": "0.4.1",
+    "@yurirtc/signaling": "0.1.0",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.28.1",
+    "javascript-obfuscator": "^5.5.0",
+    "typescript": "~5.9.3"
+  }
+}

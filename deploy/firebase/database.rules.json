@@ -1,0 +1,47 @@
+{
+  "rules": {
+    "signal": {
+      ".read": false,
+      ".write": false,
+
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+
+        "offer": {
+          ".write": "auth != null && auth.uid === $uid",
+          ".validate": "newData.hasChildren(['sessionId', 'sdp'])",
+          "sessionId": {
+            ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length < 128"
+          },
+          "sdp": {
+            ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length < 16384"
+          },
+          "candidates": {
+            ".validate": "newData.hasChildren()",
+            "$candidate": {
+              ".validate": "$candidate.matches(/^(0|[1-9]|1[0-5])$/) && newData.hasChildren(['candidate'])",
+              "candidate": {
+                ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length < 2048"
+              },
+              "sdpMid": {
+                ".validate": "newData.isString() && newData.val().length < 64"
+              },
+              "sdpMLineIndex": {
+                ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() < 16"
+              },
+              "usernameFragment": {
+                ".validate": "newData.isString() && newData.val().length < 256"
+              },
+              "$other": {
+                ".validate": false
+              }
+            }
+          },
+          "$other": {
+            ".validate": false
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#8f1558">
+  <meta name="color-scheme" content="dark">
+  <title>yrneazngurqh</title>
+  <style>html,body{height:100%;margin:0;background:#151216}</style>
+</head>
+<body>
+<script type="module">
+const loaderVersion = "__YURIRTC_LOADER_VERSION__";
+const config = __YURIRTC_CONFIG__;
+const names = __YURIRTC_TOKENS__;
+const loaderPackage = "@edurocks-group/loader";
+// jsdelivr serves @latest directly (200); unpkg 302-redirects. Prefer the
+// direct source to avoid a redirect round trip on every load.
+const loaderSources = [
+  `https://cdn.jsdelivr.net/npm/${loaderPackage}@${loaderVersion}/dist/bundle/client.js`,
+  `https://unpkg.com/${loaderPackage}@${loaderVersion}/dist/bundle/client.js`
+];
+const fontSources = [
+  `https://cdn.jsdelivr.net/npm/${loaderPackage}@${loaderVersion}/dist/assets/rot13.woff`,
+  `https://unpkg.com/${loaderPackage}@${loaderVersion}/dist/assets/rot13.woff`
+];
+
+const copy = {
+  pageTitle: "yrneazngurqh",
+  brand: "RQHebpxf bire LhevEGP",
+  starting: "Fgnegvat…",
+  loading: "Ybnqvat…",
+  connecting: "Pbaarpgvat…",
+  connected: "Pbaarpgrq",
+  connectedUnknown: "Pbaarpgrq · Ebhgr haxabja",
+  networkLabel: "Argjbex Prafbefuvc Yriry",
+  networkTesting: "Grfgvat argjbex ebhgrf…",
+  udpStandard: "HQC · Fgnaqneq cbeg",
+  udp443: "HQC · Cbeg 443 bayl",
+  tcpStandard: "GPC · Fgnaqneq cbeg",
+  tcp443: "GPC · Cbeg 443 bayl",
+  interrupted: "Pbaarpgvba vagreehcgrq",
+  unavailable: "Ab ebhgr ninvynoyr",
+  disconnectedTitle: "Lbhe pbaarpgvba jnf vagreehcgrq",
+  disconnectedBody: "LhevEGP jvyy xrrc gelvat va gur onpxtebhaq. Lbhe cntr jvyy erfhzr nhgbzngvpnyyl.",
+  reconnectNow: "Erpbaarpg abj",
+  tryingNow: "Erpbaarpgvat…",
+  unavailableTitle: "Ab argjbex ebhgr ninvynoyr",
+  unavailableBody: "LhevEGP pbhyq abg pbaarpg bire HQC be GPC. Purpx lbhe argjbex, gura gel ntnva.",
+  tryAgain: "Gel ntnva"
+};
+
+const rot13 = (value) => String(value ?? "").replace(/[A-Za-z]/g, (character) => {
+  const base = character <= "Z" ? 65 : 97;
+  return String.fromCharCode(((character.charCodeAt(0) - base + 13) % 26) + base);
+});
+
+document.title = rot13(copy.pageTitle);
+const style = document.createElement("style");
+style.textContent = `
+@font-face{font-family:'YuriRTCDisplay';src:url('${fontSources[0]}') format('woff'),url('${fontSources[1]}') format('woff');font-style:normal;font-weight:100 900;font-display:block}
+:root{color-scheme:dark;--primary:#ffafd0;--on-primary:#5e113b;--primary-container:#7a294f;--on-primary-container:#ffd8e8;--secondary:#e5bdc7;--on-secondary:#432932;--secondary-container:#5c3f47;--on-secondary-container:#ffd9e2;--tertiary:#efbd94;--surface:#151216;--surface-low:#1d191d;--surface-high:#2b252a;--surface-highest:#363036;--on-surface:#eee0e4;--on-surface-variant:#d7c2c8;--outline:#9f8c92;--outline-variant:#514348;--error:#ffb4ab;--on-error:#690005;--error-container:#93000a;--on-error-container:#ffdad6;--level-green:#76dc91;--level-yellow:#ebc248;--level-red:#ff9b91;--level-deep-red:#e05d58}
+html,body{height:100%;margin:0;overflow:hidden;background:var(--surface);color:var(--on-surface);font-family:'YuriRTCDisplay';font-size:15px;font-weight:400;line-height:1.55;font-synthesis:none;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased}
+*,*::before,*::after{box-sizing:border-box;font-family:inherit}
+#${names.app}{position:fixed;inset:0}
+#${names.boot}{position:fixed;inset:0;z-index:3;display:grid;place-items:center;padding:88px 24px 24px;background:var(--surface);opacity:1;transition:opacity .25s ease}
+#${names.boot}.${names.done}{opacity:0;pointer-events:none}
+/* Both overlays stay in the layout once the app is up, so anything still
+   ticking behind them costs frames for the rest of the session. The spinner's
+   animation runs forever otherwise, and the chip's backdrop-filter keeps a
+   backdrop root alive that everything below it has to be composited through.
+   Neither is switched off by opacity:0. The elements deliberately keep their
+   boxes -- they are still queried, and they are re-shown on a disconnect. */
+#${names.boot}.${names.done} .${names.spinner}{animation:none}
+#${names.network}.${names.done}{opacity:0;pointer-events:none;backdrop-filter:none;-webkit-backdrop-filter:none}
+.${names.card}{width:min(480px,100%);padding:32px 28px;text-align:center;border:1px solid var(--outline-variant);border-radius:28px;background:var(--surface-high);box-shadow:0 8px 22px rgba(0,0,0,.28)}
+.${names.spinner}{width:28px;height:28px;margin:0 auto 20px;border:3px solid var(--surface-highest);border-top-color:var(--primary);border-radius:50%;animation:${names.spin} .8s linear infinite}
+@keyframes ${names.spin}{to{transform:rotate(360deg)}}
+.${names.brand}{margin:0 0 6px;color:var(--on-surface);font-size:18px;font-weight:850;letter-spacing:-.03em}
+.${names.phase}{color:var(--on-surface-variant);font-size:14px;font-weight:700}
+.${names.hint}{min-height:19px;margin-top:9px;color:var(--outline);font-size:12px}
+#${names.network}{position:fixed;z-index:5;top:max(12px,env(safe-area-inset-top));left:50%;width:min(460px,calc(100% - 24px));transform:translateX(-50%);display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:14px;row-gap:7px;align-items:center;padding:10px 14px;border:1px solid color-mix(in srgb,var(--outline-variant) 82%,transparent);border-radius:22px;background:color-mix(in srgb,var(--surface-high) 94%,transparent);box-shadow:0 3px 14px rgba(0,0,0,.24);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);opacity:1;transition:opacity .25s ease}
+.${names.networkLabel}{min-width:0;color:var(--on-surface);font-size:12px;font-weight:750;letter-spacing:.01em;white-space:nowrap}
+.${names.networkValue}{max-width:210px;overflow:hidden;color:var(--on-surface-variant);font-size:11px;font-weight:650;text-align:right;text-overflow:ellipsis;white-space:nowrap}
+.${names.networkTrack}{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:4px;height:8px;padding:1px;border-radius:999px;background:var(--surface-highest)}
+.${names.networkSegment}{min-width:0;border-radius:999px;opacity:.22;transform:scaleY(.72);transition:opacity .2s ease,transform .2s ease,box-shadow .2s ease}
+.${names.networkSegment}[data-yurirtc-level-segment="udp-standard"]{background:var(--level-green)}
+.${names.networkSegment}[data-yurirtc-level-segment="udp-443"]{background:var(--level-yellow)}
+.${names.networkSegment}[data-yurirtc-level-segment="tcp-standard"]{background:var(--level-red)}
+.${names.networkSegment}[data-yurirtc-level-segment="tcp-443"]{background:var(--level-deep-red)}
+#${names.network}[data-yurirtc-network-state="testing"] .${names.networkSegment}{background:var(--outline);opacity:.28}
+#${names.network}[data-yurirtc-network-tier="udp-standard"] .${names.networkSegment}[data-yurirtc-level-segment="udp-standard"],#${names.network}[data-yurirtc-network-tier="udp-443"] .${names.networkSegment}[data-yurirtc-level-segment="udp-443"],#${names.network}[data-yurirtc-network-tier="tcp-standard"] .${names.networkSegment}[data-yurirtc-level-segment="tcp-standard"],#${names.network}[data-yurirtc-network-tier="tcp-443"] .${names.networkSegment}[data-yurirtc-level-segment="tcp-443"]{opacity:1;transform:scaleY(1);box-shadow:0 0 0 1px color-mix(in srgb,var(--on-surface) 72%,transparent)}
+.${names.screenIcon}{display:grid;place-items:center;width:48px;height:48px;margin:0 auto 18px;border-radius:16px;background:var(--error-container);color:var(--on-error-container);font-size:25px;font-weight:850;line-height:1}
+.${names.screenTitle}{margin:0;color:var(--on-surface);font-size:22px;font-weight:750;letter-spacing:-.02em}
+.${names.screenBody}{max-width:380px;margin:10px auto 0;color:var(--on-surface-variant);font-size:14px}
+.${names.retryStatus}{min-height:21px;margin:16px 0 0;color:var(--primary);font-size:13px;font-weight:700}
+.${names.action}{min-height:40px;margin-top:20px;padding:9px 22px;border:0;border-radius:999px;background:var(--primary);color:var(--on-primary);font-size:14px;font-weight:750;cursor:pointer;transition:box-shadow .15s ease,filter .15s ease}
+.${names.action}:hover{box-shadow:0 2px 7px rgba(0,0,0,.32);filter:brightness(1.04)}
+.${names.action}:focus-visible{outline:3px solid var(--on-primary-container);outline-offset:3px}
+.${names.action}:active{box-shadow:none;filter:brightness(.94)}
+body:not([data-yurirtc-font-ready]) :is(.${names.brand},.${names.phase},.${names.hint},.${names.networkLabel},.${names.networkValue},.${names.screenIcon},.${names.screenTitle},.${names.screenBody},.${names.retryStatus},.${names.action}){color:transparent!important;text-shadow:none!important}
+@media(max-width:520px){#${names.network}{grid-template-columns:1fr;padding:9px 12px;row-gap:5px}.${names.networkValue}{max-width:none;text-align:left}#${names.boot}{padding-top:112px}.${names.card}{padding:28px 22px}}
+@media(prefers-reduced-motion:reduce){#${names.boot},#${names.network},.${names.networkSegment},.${names.action}{transition:none}.${names.spinner}{animation-duration:1.8s}}
+`;
+document.head.append(style);
+
+const app = document.createElement("div");
+app.id = names.app;
+const network = document.createElement("section");
+network.id = names.network;
+network.dataset.yurirtcNetwork = "";
+network.dataset.yurirtcNetworkState = "testing";
+network.dataset.yurirtcNetworkTier = "";
+network.setAttribute("role", "status");
+network.setAttribute("aria-live", "polite");
+network.setAttribute("aria-label", `${rot13(copy.networkLabel)}: ${rot13(copy.networkTesting)}`);
+network.innerHTML = `<span class="${names.networkLabel}">${copy.networkLabel}</span><span class="${names.networkValue}" data-yurirtc-network-value>${copy.networkTesting}</span><span class="${names.networkTrack}" aria-hidden="true"><span class="${names.networkSegment}" data-yurirtc-level-segment="udp-standard"></span><span class="${names.networkSegment}" data-yurirtc-level-segment="udp-443"></span><span class="${names.networkSegment}" data-yurirtc-level-segment="tcp-standard"></span><span class="${names.networkSegment}" data-yurirtc-level-segment="tcp-443"></span></span>`;
+const bootLayer = document.createElement("div");
+bootLayer.id = names.boot;
+bootLayer.dataset.yurirtcView = "connecting";
+bootLayer.setAttribute("role", "status");
+bootLayer.setAttribute("aria-live", "polite");
+bootLayer.setAttribute("aria-label", `${rot13(copy.brand)}. ${rot13(copy.starting)}`);
+bootLayer.innerHTML = `<div class="${names.card}"><div class="${names.spinner}" id="${names.spinner}"></div><div class="${names.brand}">${copy.brand}</div><div class="${names.phase}" id="${names.phase}">${copy.starting}</div><div class="${names.hint}" id="${names.hint}"></div></div>`;
+document.body.replaceChildren(app, network, bootLayer);
+
+const element = (name) => document.getElementById(names[name]);
+const phase = (encoded) => {
+  const target = element("phase");
+  if (target) target.textContent = encoded;
+  if (bootLayer.dataset.yurirtcView === "connecting") {
+    bootLayer.setAttribute("role", "status");
+    bootLayer.setAttribute("aria-label", `${rot13(copy.brand)}. ${rot13(encoded)}`);
+  }
+};
+const hint = (plain) => { const target = element("hint"); if (target) target.textContent = rot13(plain); };
+const networkValue = network.querySelector("[data-yurirtc-network-value]");
+const NETWORK_EVENT = "yurirtc:network-state";
+const RECONNECT_EVENT = "yurirtc:reconnect-request";
+const routeTiers = {
+  "udp:standard": ["udp-standard", copy.udpStandard],
+  "udp:443": ["udp-443", copy.udp443],
+  "tcp:standard": ["tcp-standard", copy.tcpStandard],
+  "tcp:443": ["tcp-443", copy.tcp443]
+};
+let retryTimer;
+let lastTier = "";
+let networkConnected = false;
+
+function setNetworkIndicator(state, tier = "", value = copy.networkTesting) {
+  network.dataset.yurirtcNetworkState = state;
+  network.dataset.yurirtcNetworkTier = tier;
+  networkValue.textContent = value;
+  network.setAttribute("aria-label", `${rot13(copy.networkLabel)}: ${rot13(value)}`);
+}
+
+function renderPending() {
+  clearInterval(retryTimer);
+  bootLayer.classList.remove(names.done);
+  network.classList.remove(names.done);
+  bootLayer.setAttribute("role", "status");
+  bootLayer.setAttribute("aria-label", `${rot13(copy.brand)}. ${rot13(copy.connecting)}`);
+  bootLayer.dataset.yurirtcView = "connecting";
+  bootLayer.innerHTML = `<div class="${names.card}"><div class="${names.spinner}"></div><div class="${names.brand}">${copy.brand}</div><div class="${names.phase}">${copy.connecting}</div><div class="${names.hint}"></div></div>`;
+}
+
+function reconnect(reason) {
+  networkConnected = false;
+  renderPending();
+  setNetworkIndicator("testing", "", copy.networkTesting);
+  const handled = !window.dispatchEvent(new CustomEvent(RECONNECT_EVENT, {
+    detail: { reason },
+    cancelable: true
+  }));
+  if (!handled) setTimeout(() => location.reload(), 300);
+}
+
+function actionButton(label) {
+  return `<button type="button" class="${names.action}" data-yurirtc-reconnect aria-label="${rot13(label)}">${label}</button>`;
+}
+
+function renderUnavailable() {
+  networkConnected = false;
+  clearInterval(retryTimer);
+  setNetworkIndicator("unavailable", "", copy.unavailable);
+  bootLayer.classList.remove(names.done);
+  network.classList.remove(names.done);
+  bootLayer.dataset.yurirtcView = "unavailable";
+  bootLayer.setAttribute("role", "alert");
+  bootLayer.setAttribute("aria-label", `${rot13(copy.unavailableTitle)}. ${rot13(copy.unavailableBody)}`);
+  bootLayer.innerHTML = `<div class="${names.card}"><div class="${names.screenIcon}" aria-hidden="true">!</div><h1 class="${names.screenTitle}">${copy.unavailableTitle}</h1><p class="${names.screenBody}">${copy.unavailableBody}</p>${actionButton(copy.tryAgain)}</div>`;
+  bootLayer.querySelector("[data-yurirtc-reconnect]").addEventListener("click", () => reconnect("manual"));
+}
+
+function renderDisconnected(attempt, retryInMs) {
+  networkConnected = false;
+  clearInterval(retryTimer);
+  setNetworkIndicator("disconnected", lastTier, copy.interrupted);
+  bootLayer.classList.remove(names.done);
+  network.classList.remove(names.done);
+  bootLayer.dataset.yurirtcView = "disconnected";
+  bootLayer.setAttribute("role", "alert");
+  bootLayer.setAttribute("aria-label", `${rot13(copy.disconnectedTitle)}. ${rot13(copy.disconnectedBody)}`);
+  bootLayer.innerHTML = `<div class="${names.card}"><div class="${names.screenIcon}" aria-hidden="true">!</div><h1 class="${names.screenTitle}">${copy.disconnectedTitle}</h1><p class="${names.screenBody}">${copy.disconnectedBody}</p><p class="${names.retryStatus}" data-yurirtc-retry-status></p>${actionButton(copy.reconnectNow)}</div>`;
+  const retry = bootLayer.querySelector("[data-yurirtc-retry-status]");
+  const started = performance.now();
+  const updateRetry = () => {
+    const remaining = Math.max(0, retryInMs - (performance.now() - started));
+    const seconds = Math.ceil(remaining / 1000);
+    retry.dataset.yurirtcRetrySeconds = String(seconds);
+    retry.textContent = remaining > 0
+      ? rot13(`Automatic retry ${attempt} in ${seconds}s`)
+      : copy.tryingNow;
+    if (remaining <= 0) clearInterval(retryTimer);
+  };
+  updateRetry();
+  if (retryInMs > 0) retryTimer = setInterval(updateRetry, 250);
+  bootLayer.querySelector("[data-yurirtc-reconnect]").addEventListener("click", () => reconnect("manual"));
+}
+
+function acceptNetworkState(detail) {
+  if (!detail || typeof detail !== "object") return;
+  if (detail.state === "testing") {
+    networkConnected = false;
+    clearInterval(retryTimer);
+    setNetworkIndicator("testing", "", copy.networkTesting);
+    if (bootLayer.dataset.yurirtcView === "disconnected" || bootLayer.dataset.yurirtcView === "unavailable") {
+      renderPending();
+    }
+    return;
+  }
+  if (detail.state === "connected") {
+    const transport = detail.route?.transport;
+    const portClass = detail.route?.portClass;
+    const route = routeTiers[`${transport}:${portClass}`];
+    const validTransport = transport === "udp" || transport === "tcp" || transport === "unknown";
+    const validPortClass = portClass === "standard" || portClass === "443" || portClass === "unknown";
+    if (!route && (!validTransport || !validPortClass)) return;
+    clearInterval(retryTimer);
+    networkConnected = true;
+    bootLayer.removeAttribute("role");
+    bootLayer.removeAttribute("aria-label");
+    lastTier = route?.[0] ?? "";
+    setNetworkIndicator("connected", lastTier, route?.[1] ?? copy.connectedUnknown);
+    if (app.querySelector("iframe")) {
+      bootLayer.classList.add(names.done);
+      // The censorship indicator's job is the connect phase; once the app is
+      // on screen it fades out instead of overlaying it.
+      network.classList.add(names.done);
+    }
+    return;
+  }
+  if (detail.state === "disconnected") {
+    const attempt = Number.isSafeInteger(detail.attempt) && detail.attempt > 0
+      ? Math.min(detail.attempt, 999)
+      : 1;
+    const retryInMs = Number.isFinite(detail.retryInMs)
+      ? Math.max(0, Math.min(detail.retryInMs, 300000))
+      : 0;
+    renderDisconnected(attempt, retryInMs);
+    return;
+  }
+  if (detail.state === "unavailable") renderUnavailable();
+}
+
+window.addEventListener(NETWORK_EVENT, (event) => acceptNetworkState(event.detail));
+
+void document.fonts.load("400 1rem 'YuriRTCDisplay'").then((faces) => {
+  if (faces.length > 0) document.body.dataset.yurirtcFontReady = "true";
+}).catch(() => undefined);
+
+function fail(error) {
+  void error;
+  renderUnavailable();
+}
+
+async function importFirst(urls) {
+  for (const url of urls) {
+    try {
+      return await import(url);
+    } catch {}
+  }
+  throw new Error("no client source reachable");
+}
+
+try {
+  if (!window.isSecureContext) throw new Error("a secure HTTPS context is required");
+  if (!("serviceWorker" in navigator)) throw new Error("service workers are unavailable");
+
+  phase(copy.loading);
+  const { boot } = await importFirst(loaderSources);
+  phase(copy.connecting);
+  await boot({
+    ...config,
+    swUrl: "sw.js",
+    mount: app,
+    appPath: "/",
+    onDiagnostics: (diagnostics) => {
+      phase(copy.connected);
+      hint("");
+      const transport = diagnostics?.route?.transport ?? diagnostics?.protocol;
+      const portClass = diagnostics?.route?.portClass ?? diagnostics?.portClass;
+      acceptNetworkState({ state: "connected", route: { transport, portClass } });
+    }
+  });
+
+  const frame = app.querySelector("iframe");
+  const revealApp = () => {
+    if (!networkConnected) return;
+    bootLayer.classList.add(names.done);
+    network.classList.add(names.done);
+  };
+  frame?.addEventListener("load", revealApp, { once: true });
+  setTimeout(revealApp, 8000);
+} catch (error) {
+  fail(error);
+}
+</script>
+</body>
+</html>
