@@ -8,7 +8,7 @@ Keep each deployment's `index.html`, same-origin `sw.js`, and pinned loader vers
 
 ## Reporting a vulnerability
 
-Do not open a public issue for a suspected vulnerability. Use the repository's private **Report a vulnerability** or Security Advisory flow when it is available. If it is not available, contact a maintainer through a private channel listed on the repository owner's profile and ask for a secure reporting route.
+Do not open a public issue for a suspected vulnerability. Report it privately by email to **security@edurocks.org**.
 
 Include:
 
