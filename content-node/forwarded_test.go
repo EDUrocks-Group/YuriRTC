@@ -67,18 +67,20 @@ func proxyForwardedHeaders(t *testing.T, out responseSender, requestHeaders Head
 	return seen
 }
 
-// Without this the backend attributes every transported request to the node's
-// own loopback address, so one shared rate-limit bucket covers every visitor.
-func TestProxyStatesTheVisitorAddress(t *testing.T) {
+// A backend may read the absence of a forwarded-address header as proof that a
+// request came from this node rather than through its public edge, and this
+// deployment does exactly that to issue the carrier's websocket ticket. Stating
+// an address here silently breaks that, so it waits for a backend that
+// identifies this node positively.
+func TestProxyStatesNoVisitorAddressYet(t *testing.T) {
 	sender := &addressedSender{}
 	sender.address = "203.0.113.42"
 	seen := proxyForwardedHeaders(t, sender, HeaderPairs{{"accept", "text/event-stream"}})
 
-	if got := seen.Get("X-Forwarded-For"); got != "203.0.113.42" {
-		t.Fatalf("X-Forwarded-For = %q, want the peer's ICE address", got)
-	}
-	if got := seen.Get("X-Real-IP"); got != "203.0.113.42" {
-		t.Fatalf("X-Real-IP = %q, want the peer's ICE address", got)
+	for _, name := range []string{"X-Forwarded-For", "X-Real-IP"} {
+		if got := seen.Values(name); len(got) != 0 {
+			t.Fatalf("%s = %v; a backend may read its absence as proof of this node", name, got)
+		}
 	}
 	if got := seen.Get("X-Forwarded-Proto"); got != "https" {
 		t.Fatalf("X-Forwarded-Proto = %q, want https", got)
@@ -89,7 +91,9 @@ func TestProxyStatesTheVisitorAddress(t *testing.T) {
 }
 
 // A peer that could state its own address would choose a different one per
-// request and evade every per-visitor limit the backend applies.
+// request and evade every per-visitor limit the backend applies. It would also
+// be able to impersonate the public edge to a backend that tells the two apart
+// by these headers.
 func TestProxyRefusesPeerSuppliedForwardingHeaders(t *testing.T) {
 	sender := &addressedSender{}
 	sender.address = "203.0.113.42"
@@ -108,28 +112,24 @@ func TestProxyRefusesPeerSuppliedForwardingHeaders(t *testing.T) {
 		{"x-forwarded-host", "evil.example"},
 	})
 
-	if got := seen.Values("X-Forwarded-For"); len(got) != 1 || got[0] != "203.0.113.42" {
-		t.Fatalf("X-Forwarded-For = %v, want only the peer's real address", got)
-	}
-	if got := seen.Values("X-Real-IP"); len(got) != 1 || got[0] != "203.0.113.42" {
-		t.Fatalf("X-Real-IP = %v, want only the peer's real address", got)
-	}
 	if got := seen.Get("X-Forwarded-Proto"); got != "https" {
 		t.Fatalf("X-Forwarded-Proto = %q, want the node's own value", got)
 	}
-	for _, name := range []string{"Forwarded", "X-Client-Ip", "Cf-Connecting-Ip", "True-Client-Ip", "X-Forwarded-Host"} {
+	for _, name := range []string{
+		"X-Forwarded-For", "X-Real-Ip", "Forwarded", "X-Client-Ip",
+		"Cf-Connecting-Ip", "True-Client-Ip", "X-Forwarded-Host",
+	} {
 		if got := seen.Values(name); len(got) != 0 {
 			t.Fatalf("%s reached the backend as %v; only this node may state it", name, got)
 		}
 	}
 }
 
-// A sender with no address (tests, or a peer whose pair is not yet nominated)
-// must not invent one: a bogus value is worse than the loopback default.
-func TestProxyOmitsAnUnknownVisitorAddress(t *testing.T) {
+// The strip applies to every sender, including one that reports no address.
+func TestProxyStripsForwardingHeadersWithoutAPeerAddress(t *testing.T) {
 	seen := proxyForwardedHeaders(t, &collectingSender{}, HeaderPairs{{"x-forwarded-for", "10.0.0.1"}})
 	if got := seen.Values("X-Forwarded-For"); len(got) != 0 {
-		t.Fatalf("X-Forwarded-For = %v, want none when the address is unknown", got)
+		t.Fatalf("X-Forwarded-For = %v, want none", got)
 	}
 }
 
