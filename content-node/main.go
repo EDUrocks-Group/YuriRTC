@@ -385,7 +385,12 @@ func answerOffer(ctx context.Context, api *webrtc.API, handler *Handler, peers *
 	}
 	session = NewPeerSession(handler, closePeer)
 
+	capturePeerAddress := func() {
+		session.SetPeerAddress(selectedRemoteAddress(pc))
+	}
+
 	pc.OnDataChannel(func(channel *webrtc.DataChannel) {
+		capturePeerAddress()
 		if err := session.Attach(channel); err != nil {
 			// Rejections are counted in the aggregate health line. Logging each
 			// attacker-created channel would create an avoidable log-ingestion DoS.
@@ -405,6 +410,7 @@ func answerOffer(ctx context.Context, api *webrtc.API, handler *Handler, peers *
 		switch state {
 		case webrtc.PeerConnectionStateConnected:
 			connectedDeadline.Stop()
+			capturePeerAddress()
 			peers.MarkConnected(pc)
 		case webrtc.PeerConnectionStateFailed:
 			connectedDeadline.Stop()
@@ -491,6 +497,30 @@ func answerOffer(ctx context.Context, api *webrtc.API, handler *Handler, peers *
 	candidateMu.Unlock()
 
 	return AnswerBlob{SDP: local.SDP, Candidates: out}, nil
+}
+
+// selectedRemoteAddress reports the visitor's address from the nominated ICE
+// candidate pair, or "" while no pair is selected. Every intermediate value is
+// checked because this runs on connection-state callbacks, where a peer that is
+// already tearing down can leave any of them nil.
+func selectedRemoteAddress(pc *webrtc.PeerConnection) string {
+	sctp := pc.SCTP()
+	if sctp == nil {
+		return ""
+	}
+	dtls := sctp.Transport()
+	if dtls == nil {
+		return ""
+	}
+	iceTransport := dtls.ICETransport()
+	if iceTransport == nil {
+		return ""
+	}
+	pair, err := iceTransport.GetSelectedCandidatePair()
+	if err != nil || pair == nil || pair.Remote == nil {
+		return ""
+	}
+	return pair.Remote.Address
 }
 
 var errNoLocalDescription = errorString("no local description after gathering")

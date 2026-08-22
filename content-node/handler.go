@@ -84,6 +84,12 @@ type bulkResponseLimiter interface {
 	AcquireBulk(ctx context.Context) (release func(), err error)
 }
 
+// peerAddressSource supplies the visitor address this node states to the
+// backend on the peer's behalf. PeerSession is the production implementation.
+type peerAddressSource interface {
+	PeerAddress() string
+}
+
 func NewHandler(root, backendURL string) *Handler {
 	return &Handler{
 		Root:       root,
@@ -279,8 +285,11 @@ func (h *Handler) proxy(ctx context.Context, out responseSender, id uint32, head
 		return err
 	}
 	for _, pair := range head.Headers {
-		name := pair[0]
-		if isHopByHop(name) || name == "host" {
+		// Lowercase before every comparison: Header.Add canonicalises names, so
+		// a peer sending "X-Forwarded-For" in any casing would otherwise reach
+		// the backend under the same canonical key a case-sensitive check missed.
+		name := strings.ToLower(pair[0])
+		if isHopByHop(name) || name == "host" || isForwardingHeader(name) {
 			continue
 		}
 		request.Header.Add(name, pair[1])
@@ -290,6 +299,19 @@ func (h *Handler) proxy(ctx context.Context, out responseSender, id uint32, head
 	// `trust proxy`) to decide whether it may emit Secure session cookies. Without
 	// it login returns 200 but no sid is ever created.
 	request.Header.Set("X-Forwarded-Proto", "https")
+	// This node is the backend's only reverse proxy, so it owns the forwarding
+	// headers: every peer-supplied one was dropped above and the visitor's real
+	// address is stated here. Without it the backend attributes every request
+	// that crosses the transport to the node's own loopback address, so per-IP
+	// rate limits, captcha gating, and stored records treat the entire user base
+	// as one visitor. The address comes from the nominated ICE candidate pair,
+	// which the peer cannot choose.
+	if source, ok := out.(peerAddressSource); ok {
+		if address := source.PeerAddress(); address != "" {
+			request.Header.Set("X-Forwarded-For", address)
+			request.Header.Set("X-Real-IP", address)
+		}
+	}
 	// The backend's session cookie is domain-scoped to its own host; the SW is
 	// the service-worker jar and has already put the right Cookie header on the frame.
 	request.Host = hostOf(h.BackendURL)
@@ -421,6 +443,19 @@ func parseRange(raw string, size int64) (int64, int64, bool) {
 
 func isImmutable(urlPath string) bool {
 	return strings.HasPrefix(urlPath, "/a/")
+}
+
+// isForwardingHeader lists the headers that describe who a request came
+// through. Only this node may state them, because the backend trusts them to
+// identify a visitor.
+func isForwardingHeader(name string) bool {
+	switch name {
+	case "forwarded", "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host",
+		"x-forwarded-port", "x-forwarded-server", "x-real-ip", "x-client-ip",
+		"cf-connecting-ip", "true-client-ip":
+		return true
+	}
+	return false
 }
 
 func isHopByHop(name string) bool {

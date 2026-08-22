@@ -169,6 +169,13 @@ type PeerSession struct {
 
 	bulkSlots chan struct{}
 
+	// peerAddress is the remote address of the selected ICE candidate pair, set
+	// once the connection is established. The API backend sits behind this node
+	// exactly as it sits behind a reverse proxy, so it needs the visitor's
+	// address to attribute rate limits and stored records to one person rather
+	// than to the node itself.
+	peerAddress atomic.Pointer[string]
+
 	// A generation channel provides a broadcast wakeup when any lane drains.
 	// Each lane's threshold is laneBufferedAmountLowThreshold. Whenever the
 	// aggregate exceeds a high-water mark at least one lane must be above that
@@ -180,6 +187,24 @@ type PeerSession struct {
 
 func (s *PeerSession) requestPeerClose() {
 	s.closePeerOnce.Do(func() { go s.closePeer() })
+}
+
+// SetPeerAddress records the visitor's address for backend attribution. An
+// empty address is ignored so a failed lookup cannot erase a known one.
+func (s *PeerSession) SetPeerAddress(address string) {
+	if address == "" {
+		return
+	}
+	s.peerAddress.Store(&address)
+}
+
+// PeerAddress is empty until ICE selects a pair, which is before any request
+// can arrive: a request needs a data channel, and that needs a live pair.
+func (s *PeerSession) PeerAddress() string {
+	if address := s.peerAddress.Load(); address != nil {
+		return *address
+	}
+	return ""
 }
 
 type sessionLane struct {
