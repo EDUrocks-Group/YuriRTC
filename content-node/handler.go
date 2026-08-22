@@ -299,23 +299,19 @@ func (h *Handler) proxy(ctx context.Context, out responseSender, id uint32, head
 	// `trust proxy`) to decide whether it may emit Secure session cookies. Without
 	// it login returns 200 but no sid is ever created.
 	request.Header.Set("X-Forwarded-Proto", "https")
-	// Deliberately no X-Forwarded-For or X-Real-IP yet, although the visitor's
-	// address is available here through peerAddressSource.
+	// Who the visitor is. Without this a backend sees only this node's own
+	// address and treats the transport's entire user base as one visitor, so a
+	// per-address rate limit is shared by everyone at once. Every peer-supplied
+	// copy was dropped above, and the address comes from the nominated ICE
+	// candidate pair, which the peer cannot choose.
 	//
-	// A backend may use the absence of those headers as proof that a request
-	// arrived from this node rather than through its public reverse proxy,
-	// because an edge proxy adds them to everything it forwards. Stating them
-	// here makes every transported request look like an edge request, which
-	// silently changes such a backend's behaviour -- in this deployment it
-	// turned the carrier's websocket ticket into an address-bound one that the
-	// upstream can only reject, because the upstream sees this node's address
-	// and not the visitor's.
-	//
-	// Sending them requires the backend to identify this node positively
-	// instead, by a shared secret it can verify, and both sides must agree
-	// before either changes. Until then the backend attributes every
-	// transported request to this node's own address, so per-visitor limits are
-	// shared across the transport's whole user base.
+	// The standard forwarding headers stay absent on purpose; see
+	// peerAddressHeader.
+	if source, ok := out.(peerAddressSource); ok {
+		if address := source.PeerAddress(); address != "" {
+			request.Header.Set(peerAddressHeader, address)
+		}
+	}
 	// The backend's session cookie is domain-scoped to its own host; the SW is
 	// the service-worker jar and has already put the right Cookie header on the frame.
 	request.Host = hostOf(h.BackendURL)
@@ -449,14 +445,27 @@ func isImmutable(urlPath string) bool {
 	return strings.HasPrefix(urlPath, "/a/")
 }
 
+// peerAddressHeader carries the visitor's address to the backend.
+//
+// Deliberately not X-Forwarded-For: a backend may use the absence of the
+// standard forwarding headers as proof that a request came from this node
+// rather than through its public edge, and stating them silently changes such
+// a backend's behaviour. A header of this node's own leaves that proof intact,
+// so the two changes can also ship in either order -- a backend that does not
+// read it yet is unaffected, and this node stating it early costs nothing.
+const peerAddressHeader = "X-YuriRTC-Peer"
+
 // isForwardingHeader lists the headers that describe who a request came
-// through. Only this node may state them, because the backend trusts them to
-// identify a visitor.
+// through or who it came from. Only this node may state them, because a
+// backend trusts them to identify a visitor: any copy a peer sends is dropped,
+// including the vendor-specific ones an edge normally writes itself.
 func isForwardingHeader(name string) bool {
 	switch name {
 	case "forwarded", "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host",
 		"x-forwarded-port", "x-forwarded-server", "x-real-ip", "x-client-ip",
-		"cf-connecting-ip", "true-client-ip":
+		"cf-connecting-ip", "true-client-ip", "fastly-client-ip",
+		"x-azure-clientip", "cloudfront-viewer-address",
+		"x-yurirtc-peer":
 		return true
 	}
 	return false

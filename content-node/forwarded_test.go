@@ -67,16 +67,19 @@ func proxyForwardedHeaders(t *testing.T, out responseSender, requestHeaders Head
 	return seen
 }
 
-// A backend may read the absence of a forwarded-address header as proof that a
-// request came from this node rather than through its public edge, and this
-// deployment does exactly that to issue the carrier's websocket ticket. Stating
-// an address here silently breaks that, so it waits for a backend that
-// identifies this node positively.
-func TestProxyStatesNoVisitorAddressYet(t *testing.T) {
+// The visitor's address travels in a header of this node's own. A backend may
+// read the absence of the standard forwarding headers as proof that a request
+// came from this node rather than through its public edge -- this deployment
+// does exactly that to issue the carrier's websocket ticket -- so stating those
+// would silently break it.
+func TestProxyStatesTheVisitorAddress(t *testing.T) {
 	sender := &addressedSender{}
 	sender.address = "203.0.113.42"
 	seen := proxyForwardedHeaders(t, sender, HeaderPairs{{"accept", "text/event-stream"}})
 
+	if got := seen.Get(peerAddressHeader); got != "203.0.113.42" {
+		t.Fatalf("%s = %q, want the peer's ICE address", peerAddressHeader, got)
+	}
 	for _, name := range []string{"X-Forwarded-For", "X-Real-IP"} {
 		if got := seen.Values(name); len(got) != 0 {
 			t.Fatalf("%s = %v; a backend may read its absence as proof of this node", name, got)
@@ -108,16 +111,27 @@ func TestProxyRefusesPeerSuppliedForwardingHeaders(t *testing.T) {
 		{"x-client-ip", "10.0.0.6"},
 		{"cf-connecting-ip", "10.0.0.7"},
 		{"true-client-ip", "10.0.0.8"},
+		{"fastly-client-ip", "10.0.0.9"},
+		{"x-azure-clientip", "10.0.0.10"},
+		{"cloudfront-viewer-address", "10.0.0.11:443"},
 		{"x-forwarded-proto", "http"},
 		{"x-forwarded-host", "evil.example"},
+		// The node's own header is no more trustworthy from a peer than the
+		// standard ones: a peer that could set it would choose its own identity.
+		{"x-yurirtc-peer", "10.0.0.12"},
 	})
+
+	if got := seen.Values(peerAddressHeader); len(got) != 1 || got[0] != "203.0.113.42" {
+		t.Fatalf("%s = %v, want only the peer's real address", peerAddressHeader, got)
+	}
 
 	if got := seen.Get("X-Forwarded-Proto"); got != "https" {
 		t.Fatalf("X-Forwarded-Proto = %q, want the node's own value", got)
 	}
 	for _, name := range []string{
 		"X-Forwarded-For", "X-Real-Ip", "Forwarded", "X-Client-Ip",
-		"Cf-Connecting-Ip", "True-Client-Ip", "X-Forwarded-Host",
+		"Cf-Connecting-Ip", "True-Client-Ip", "Fastly-Client-Ip",
+		"X-Azure-Clientip", "Cloudfront-Viewer-Address", "X-Forwarded-Host",
 	} {
 		if got := seen.Values(name); len(got) != 0 {
 			t.Fatalf("%s reached the backend as %v; only this node may state it", name, got)
@@ -125,11 +139,18 @@ func TestProxyRefusesPeerSuppliedForwardingHeaders(t *testing.T) {
 	}
 }
 
-// The strip applies to every sender, including one that reports no address.
-func TestProxyStripsForwardingHeadersWithoutAPeerAddress(t *testing.T) {
-	seen := proxyForwardedHeaders(t, &collectingSender{}, HeaderPairs{{"x-forwarded-for", "10.0.0.1"}})
-	if got := seen.Values("X-Forwarded-For"); len(got) != 0 {
-		t.Fatalf("X-Forwarded-For = %v, want none", got)
+// A sender with no address (a peer whose pair is not yet nominated) must not
+// invent one: a bogus address is worse than none, because a backend would
+// attribute a real visitor's traffic to it.
+func TestProxyStatesNothingWithoutAPeerAddress(t *testing.T) {
+	seen := proxyForwardedHeaders(t, &collectingSender{}, HeaderPairs{
+		{"x-forwarded-for", "10.0.0.1"},
+		{"x-yurirtc-peer", "10.0.0.2"},
+	})
+	for _, name := range []string{"X-Forwarded-For", peerAddressHeader} {
+		if got := seen.Values(name); len(got) != 0 {
+			t.Fatalf("%s = %v, want none when the address is unknown", name, got)
+		}
 	}
 }
 
