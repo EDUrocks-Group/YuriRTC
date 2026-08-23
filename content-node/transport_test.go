@@ -92,7 +92,7 @@ func TestResolveICEPorts(t *testing.T) {
 		want     []int
 		wantErr  bool
 	}{
-		{name: "defaults", list: defaultICEPorts, want: []int{443, 80, 5228, 5229, 5230, 5223, 2197, 53, 123, 49152}},
+		{name: "defaults", list: defaultICEPorts, want: []int{443, 80, 5228, 5229, 5230, 5223, 2197, 53, 123, 49152, 445}},
 		{name: "whitespace", list: " 443, 80 ,49152 ", want: []int{443, 80, 49152}},
 		{name: "legacy override", list: "not-used", override: 8443, want: []int{8443}},
 		{name: "empty", list: "", wantErr: true},
@@ -890,19 +890,23 @@ func TestDefaultICEPortsStayOrderedByReachability(t *testing.T) {
 	for position, port := range ports {
 		rank[port] = position
 	}
-	for _, required := range []int{443, 80, 5228, 5229, 5230, 5223, 2197, 53, 123, 49152} {
+	for _, required := range []int{443, 80, 5228, 5229, 5230, 5223, 2197, 53, 123, 49152, 445} {
 		if _, present := rank[required]; !present {
 			t.Fatalf("port %d is missing from the default list", required)
 		}
 	}
 
-	// The web's own ports lead; the ephemeral port, which strict egress
-	// filtering drops first, comes last.
+	// The web's own ports lead. SMB trails everything: it is blocked outbound
+	// almost everywhere and conspicuous where it is not, so it is reached only
+	// once every other port has failed. The ephemeral port sits just above it.
 	if rank[443] != 0 || rank[80] != 1 {
 		t.Fatalf("443 and 80 must lead, got positions %d and %d", rank[443], rank[80])
 	}
-	if rank[49152] != len(ports)-1 {
-		t.Fatalf("49152 must come last, got position %d", rank[49152])
+	if rank[445] != len(ports)-1 {
+		t.Fatalf("445 must come last, got position %d", rank[445])
+	}
+	if rank[49152] != len(ports)-2 {
+		t.Fatalf("49152 must sit just above 445, got position %d", rank[49152])
 	}
 	// Push ports are opened by managed device fleets; DNS and NTP are usually
 	// permitted but often redirected, which looks open and is not.

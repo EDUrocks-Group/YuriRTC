@@ -52,10 +52,14 @@ const (
 	//	           which looks open and is not
 	//	49152      the bottom of the ephemeral range: the first thing strict
 	//	           egress filtering drops, reachable only where it is absent
+	//	445        SMB, blocked outbound almost everywhere since the worms that
+	//	           spread over it, and conspicuous where it is not: an intrusion
+	//	           detector may read a connection to it as malware. Last, so it
+	//	           is reached only once everything above has failed
 	//
 	// Each port costs two listening sockets here and four more candidates in
 	// every offer, so this is a deliberate set rather than a wide sweep.
-	defaultICEPorts = "443,80,5228,5229,5230,5223,2197,53,123,49152"
+	defaultICEPorts = "443,80,5228,5229,5230,5223,2197,53,123,49152,445"
 	// Packets buffered between an ICE-TCP connection's read loop and its DTLS
 	// consumer. pion/ice blocks (it does not drop) when this queue is full, so
 	// the value only sets how much burst a school-network TCP client can land
