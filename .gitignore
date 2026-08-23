@@ -8,6 +8,8 @@ coverage/
 # build script stay tracked under deploy/npm/src and deploy/npm/build.mjs.
 deploy/npm/index.html
 deploy/npm/sw.js
+# Per-deployment copies of that generated pair, one directory per destination.
+deploy/npm/deployments/
 .env
 .env.*
 !.env.example
