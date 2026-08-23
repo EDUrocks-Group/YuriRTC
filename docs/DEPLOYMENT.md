@@ -83,7 +83,7 @@ Configure it with YuriRTC environment names:
 ```ini
 YURIRTC_PUBLIC_IP=203.0.113.10
 YURIRTC_BIND_IP=203.0.113.10
-YURIRTC_PORTS=443,80,49152
+YURIRTC_PORTS=443,80,5228,5229,5230,5223,2197,53,123,49152
 YURIRTC_ROOT=/var/lib/yurirtc/site
 YURIRTC_BACKEND=http://127.0.0.1:1801
 YURIRTC_PROJECT=example-project
@@ -93,7 +93,7 @@ GOOGLE_APPLICATION_CREDENTIALS=/etc/yurirtc/service-account.json
 
 `203.0.113.10` is a documentation-only address. `YURIRTC_DATABASE_URL` must be copied from the Firebase console; do not construct it from the project name because RTDB host formats vary.
 
-The default port set opens each listed port over both UDP and TCP. Change it when a port is already owned on the selected bind address. A common deployment gives the content node its own address so low TCP ports do not conflict with a conventional web server.
+The default port set opens each listed port over both UDP and TCP, and ICE uses whichever pair reaches the visitor. List ports least to most likely to be filtered: every host candidate on one address carries the same ICE priority whatever its port, so the order is what decides which the browser tries first, and it paces parallel checks rather than sequencing fallbacks. Change the set when a port is already owned on the selected bind address; binding is all-or-nothing, so one conflict stops the node from starting. A common deployment gives the content node its own address so low ports do not conflict with a conventional web server. Each port costs two listening sockets and four more candidates in every offer, and the host firewall must permit each one over both protocols.
 
 Generic Linux examples are provided in `deploy/systemd/content-node.service`, `deploy/systemd/node.env.example`, and `deploy/sysctl/90-yurirtc-content-node.conf`. Review all paths, identities, limits, ports, and kernel settings for the target host before installing them; they are templates rather than an unattended installer.
 

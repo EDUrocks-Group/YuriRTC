@@ -92,7 +92,7 @@ func TestResolveICEPorts(t *testing.T) {
 		want     []int
 		wantErr  bool
 	}{
-		{name: "defaults", list: defaultICEPorts, want: []int{443, 80, 49152}},
+		{name: "defaults", list: defaultICEPorts, want: []int{443, 80, 5228, 5229, 5230, 5223, 2197, 53, 123, 49152}},
 		{name: "whitespace", list: " 443, 80 ,49152 ", want: []int{443, 80, 49152}},
 		{name: "legacy override", list: "not-used", override: 8443, want: []int{8443}},
 		{name: "empty", list: "", wantErr: true},
@@ -872,4 +872,45 @@ func assertTCPPortAvailable(t *testing.T, ip net.IP, port int) {
 		t.Fatalf("TCP %s:%d was not released: %v", ip, port, err)
 	}
 	_ = listener.Close()
+}
+
+// The default list is ordered least-to-most likely to be filtered, because
+// every host candidate on one address carries the same ICE priority whatever
+// its port: this order is the only thing that decides which the browser tries
+// first. A reshuffle would silently make the least reachable port the one a
+// restricted network waits on, so the intent is pinned here rather than left
+// to a comment.
+func TestDefaultICEPortsStayOrderedByReachability(t *testing.T) {
+	ports, err := resolveICEPorts(defaultICEPorts, 0)
+	if err != nil {
+		t.Fatalf("default ports do not parse: %v", err)
+	}
+
+	rank := make(map[int]int, len(ports))
+	for position, port := range ports {
+		rank[port] = position
+	}
+	for _, required := range []int{443, 80, 5228, 5229, 5230, 5223, 2197, 53, 123, 49152} {
+		if _, present := rank[required]; !present {
+			t.Fatalf("port %d is missing from the default list", required)
+		}
+	}
+
+	// The web's own ports lead; the ephemeral port, which strict egress
+	// filtering drops first, comes last.
+	if rank[443] != 0 || rank[80] != 1 {
+		t.Fatalf("443 and 80 must lead, got positions %d and %d", rank[443], rank[80])
+	}
+	if rank[49152] != len(ports)-1 {
+		t.Fatalf("49152 must come last, got position %d", rank[49152])
+	}
+	// Push ports are opened by managed device fleets; DNS and NTP are usually
+	// permitted but often redirected, which looks open and is not.
+	for _, push := range []int{5228, 5229, 5230, 5223, 2197} {
+		for _, redirected := range []int{53, 123} {
+			if rank[push] > rank[redirected] {
+				t.Fatalf("push port %d must be tried before %d", push, redirected)
+			}
+		}
+	}
 }

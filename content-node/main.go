@@ -32,7 +32,30 @@ import (
 const (
 	firebaseDatabaseScope = "https://www.googleapis.com/auth/firebase.database"
 	userInfoEmailScope    = "https://www.googleapis.com/auth/userinfo.email"
-	defaultICEPorts       = "443,80,49152"
+	// Every port is opened over both UDP and TCP, and ICE picks whichever pair
+	// works. They are listed from least to most likely to be filtered, because
+	// that is the order the browser paces its connectivity checks in: all host
+	// candidates on one address carry the same ICE priority whatever their
+	// port, so this order is the only thing deciding which is tried first. It
+	// paces rather than sequences -- checks go out in parallel, so a port late
+	// in the list costs a little time, not the connection.
+	//
+	//	443, 80    the web's own ports; open essentially everywhere
+	//	5228-5230  Google Play and Chrome push. A managed Chromebook fleet
+	//	           cannot function without them, so a school that hands out
+	//	           Chromebooks has already opened them
+	//	5223       Apple push, open wherever iPads are supported
+	//	2197       Apple's alternate push port, which exists for networks that
+	//	           block 5223
+	//	53, 123    DNS and NTP. Usually permitted, but both are commonly
+	//	           redirected to the network's own resolver or time server,
+	//	           which looks open and is not
+	//	49152      the bottom of the ephemeral range: the first thing strict
+	//	           egress filtering drops, reachable only where it is absent
+	//
+	// Each port costs two listening sockets here and four more candidates in
+	// every offer, so this is a deliberate set rather than a wide sweep.
+	defaultICEPorts = "443,80,5228,5229,5230,5223,2197,53,123,49152"
 	// Packets buffered between an ICE-TCP connection's read loop and its DTLS
 	// consumer. pion/ice blocks (it does not drop) when this queue is full, so
 	// the value only sets how much burst a school-network TCP client can land
