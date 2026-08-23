@@ -1,6 +1,6 @@
 {
   "name": "@edurocks-group/loader",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "type": "module",
   "description": "YuriRTC browser client and service worker transport. The package name is retained for deployed-client compatibility.",
   "license": "AGPL-3.0-only",
