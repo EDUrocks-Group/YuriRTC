@@ -13,6 +13,9 @@ unset NPM_LOADER_TOKEN NPM_INTEGRITY_TOKEN NPM_TOKEN NODE_AUTH_TOKEN
 # Never fall back to a runner/operator ~/.npmrc that may contain registry
 # credentials. The verification graph only installs public dependencies.
 export NPM_CONFIG_USERCONFIG=/dev/null
+# Build and test every Go module with the patched toolchain required by the
+# content-node go directive, including the locally replaced SCTP module.
+export GOTOOLCHAIN=go1.25.13
 
 if [[ "${GITHUB_ACTIONS:-}" == "true" && -e "$ROOT/.env.release" ]]; then
   echo ".env.release must not be present in a GitHub Actions workspace" >&2
@@ -32,6 +35,7 @@ npm test
   go test -count=1 ./...
   go test -race -count=1 ./...
   go vet ./...
+  go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
   YURIRTC_BROWSER_E2E=1 go test -count=1 -run TestBrowserV3EndToEnd -v
 )
 (

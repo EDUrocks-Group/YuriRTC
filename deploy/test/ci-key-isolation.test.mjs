@@ -21,6 +21,8 @@ test("local CI strips release credentials and never sources the release file", a
   assert.doesNotMatch(gate, /source\s+[^\n]*\.env\.release/);
   assert.match(gate, /unset YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY/);
   assert.match(gate, /NPM_CONFIG_USERCONFIG=\/dev\/null/);
+  assert.match(gate, /GOTOOLCHAIN=go1\.25\.13/);
+  assert.match(gate, /govulncheck@v1\.7\.0/);
   assert.match(gate, /node deploy\/build-ci-artifacts\.mjs/);
   assert.doesNotMatch(gate, /npm pack/);
 });
