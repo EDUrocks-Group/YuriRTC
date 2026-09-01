@@ -118,6 +118,8 @@ context.setDefaultTimeout(canaryTimeoutMs);
 const cdnRequests = { client: 0, worker: 0, font: 0, metadata: 0 };
 const workerVersions = new Set();
 const firebaseRequests = { auth: 0, firestore: 0, rtdb: 0 };
+const successfulRequests = { cdn: 0, firebase: 0, other: 0 };
+const cancelledRequests = { cdn: 0, firebase: 0, other: 0 };
 const failedRequests = { cdn: 0, firebase: 0, other: 0 };
 const requestKinds = new WeakMap();
 
@@ -159,8 +161,21 @@ const classifyRequest = (requestUrl) => {
 context.on("request", (request) => {
   requestKinds.set(request, classifyRequest(request.url()));
 });
+context.on("response", (response) => {
+  if (!response.ok()) return;
+  successfulRequests[requestKinds.get(response.request()) ?? "other"] += 1;
+});
 context.on("requestfailed", (request) => {
-  failedRequests[requestKinds.get(request) ?? "other"] += 1;
+  const kind = requestKinds.get(request) ?? "other";
+  const errorText = request.failure()?.errorText ?? "";
+  // The loader deliberately aborts the losing Firebase signaling leg and CDN
+  // fallback after a verified winner. Browser engines surface those expected
+  // AbortController cancellations as request failures even though boot succeeds.
+  if (/abort|cancel/i.test(errorText)) {
+    cancelledRequests[kind] += 1;
+    return;
+  }
+  failedRequests[kind] += 1;
 });
 
 const page = await context.newPage();
@@ -233,6 +248,7 @@ try {
     firebaseRequests.auth + firebaseRequests.firestore + firebaseRequests.rtdb > 0,
     "no request reached the real Firebase signaling services"
   );
+  assert.ok(successfulRequests.firebase > 0, "no Firebase signaling response succeeded");
   assert.equal(failedRequests.cdn, 0, "a live CDN request failed");
   assert.equal(failedRequests.firebase, 0, "a real Firebase signaling request failed");
   assert.equal(carrierRequests.other, 0, "application traffic escaped to the static carrier");
@@ -243,6 +259,8 @@ try {
     result,
     cdnRequests,
     firebaseRequests,
+    successfulRequests,
+    cancelledRequests,
     carrierRequests,
     failedRequests
   })}\n`);
