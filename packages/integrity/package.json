@@ -1,0 +1,33 @@
+{
+  "name": "shaintloadingcheckpak",
+  "version": "1.0.1",
+  "description": "Signed immutable loader pointer for YuriRTC carriers.",
+  "license": "MIT",
+  "contentPolicy": {
+    "class": "dual-use"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EDUrocks-Group/YuriRTC.git",
+    "directory": "packages/integrity"
+  },
+  "homepage": "https://github.com/EDUrocks-Group/YuriRTC#readme",
+  "bugs": {
+    "url": "https://github.com/EDUrocks-Group/YuriRTC/issues"
+  },
+  "type": "module",
+  "files": [
+    "DISCLOSURE",
+    "LICENSE",
+    "loader.json"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test '../../deploy/npm/test/integrity-loader.test.mjs'",
+    "prepack": "npm run build && npm run verify:package",
+    "verify:package": "node verify-package.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

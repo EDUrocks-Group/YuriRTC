@@ -14,18 +14,26 @@ import {
 } from "./config.js";
 import {
   INITIAL_CREDIT,
+  WIRE_ACCEPT_ENCODING_HEADER,
+  WIRE_CONTENT_ENCODING_HEADER,
+  decodeWireBody,
   headerValue,
+  requestBodyForTransport,
   responseCanHaveBody,
   responseHeaders,
+  supportsWireGzip,
   withoutHeader
 } from "./bridge.js";
 import {
   cacheWhileConsumed,
+  cachedResponseIsFresh,
   clearAllCaches,
   currentCacheNames,
   matchCached,
   purgeStale,
   putBounded,
+  removeCached,
+  responseForbidsStoredFallback,
   useVersion
 } from "./cache.js";
 import { classifyRequest, isRanged, requestPriority } from "./routing.js";
@@ -387,6 +395,8 @@ async function handle(request: Request, logicalPath: string): Promise<Response> 
     request.destination !== "iframe" &&
     request.destination !== "frame";
   const expected = await transportExpected();
+  const transportCacheable = classification.cacheable &&
+    (classification.policy !== "revalidate-lru" || expected);
   // Every ancestor between the shell and a SAB game must opt into COEP. On a
   // static transport deployment that means all navigated frames, not only the
   // final g-fra-sab document. Direct hosting retains the narrower V4/V5 rule.
@@ -434,16 +444,48 @@ async function handle(request: Request, logicalPath: string): Promise<Response> 
     : await bridge.isLikelyConnected();
   const canGoFresh = connected || !expected;
   const preferFresh = alwaysFresh && canGoFresh;
+  const cacheReadAllowed = request.cache !== "no-store" && request.cache !== "reload";
+  const forceCached = request.cache === "force-cache" || request.cache === "only-if-cached";
 
-  if (classification.cacheable && !ranged && !preferFresh && request.method === "GET") {
+  let validatorCacheHit: Response | undefined;
+
+  if (
+    transportCacheable &&
+    cacheReadAllowed &&
+    !ranged &&
+    !preferFresh &&
+    request.method === "GET"
+  ) {
     const hit = await matchCached(request, classification.policy);
     if (hit) {
-      if (classification.policy === "stale-while-revalidate" && connected) {
+      if (
+        classification.policy === "stale-while-revalidate" &&
+        connected &&
+        request.cache !== "no-cache"
+      ) {
         // Fire and forget; a failed revalidation must not fail the response.
-        void revalidate(request, classification.policy, logicalPath);
+        void revalidate(request, classification.policy, logicalPath, hit.clone());
       }
-      return withIsolationHeaders(await withTransport(hit, request), isolate);
+      if (
+        forceCached ||
+        (classification.policy !== "revalidate-lru" && request.cache !== "no-cache") ||
+        (request.cache !== "no-cache" && cachedResponseIsFresh(hit)) ||
+        !connected
+      ) {
+        return withIsolationHeaders(await withTransport(hit, request), isolate);
+      }
+      // Generic static content is safe to retain, but not safe to assume
+      // immutable. Hold this entry as an offline fallback and ask the node to
+      // validate it before transferring another body.
+      validatorCacheHit = hit;
     }
+  }
+
+  // `only-if-cached` is a cache-only operation. Letting a miss escape to the
+  // transport both violates the request contract and can unexpectedly wake a
+  // dormant carrier. A synthetic 504 matches browser HTTP-cache behavior.
+  if (request.cache === "only-if-cached") {
+    return new Response(null, { status: 504, statusText: "Gateway Timeout" });
   }
 
   // Two different reasons there might be no transport, needing opposite
@@ -479,9 +521,30 @@ async function handle(request: Request, logicalPath: string): Promise<Response> 
   }
 
   try {
-    let response = await fromTransport(request, logicalPath);
+    const transportRequest = validatorCacheHit
+      ? conditionalRequest(request, validatorCacheHit)
+      : request;
+    let response = await fromTransport(transportRequest, logicalPath);
+    if (response.status === 304) {
+      if (!validatorCacheHit) {
+        throw new Error("transport returned 304 without a cached representation");
+      }
+      response = mergeNotModified(validatorCacheHit, response);
+      // Refresh validator/date metadata without making the foreground wait on
+      // CacheStorage. The response clone reads local cache bytes, not YuriRTC.
+      void putBounded(
+        request,
+        response.clone(),
+        classification.policy,
+        cacheBudget()
+      );
+      return withIsolationHeaders(await withTransport(response, request), isolate);
+    }
+    if (validatorCacheHit && responseForbidsStoredFallback(response)) {
+      void removeCached(request, classification.policy);
+    }
     if (
-      classification.cacheable &&
+      transportCacheable &&
       !ranged &&
       request.method === "GET" &&
       response.ok
@@ -504,13 +567,40 @@ async function handle(request: Request, logicalPath: string): Promise<Response> 
         : redirectToLoaderShell(url);
     }
     // Last resort: a stale cached copy beats an error page.
-    const stale = await matchCached(request, classification.policy);
+    const stale = validatorCacheHit ?? (transportCacheable
+      ? await matchCached(request, classification.policy)
+      : undefined);
     if (stale) return withIsolationHeaders(await withTransport(stale, request), isolate);
     return new Response(`transport error: ${String(error)}`, {
       status: 502,
       headers: { "content-type": "text/plain" }
     });
   }
+}
+
+function conditionalRequest(request: Request, cached: Response): Request {
+  const headers = new Headers(request.headers);
+  const etag = cached.headers.get("etag");
+  const modified = cached.headers.get("last-modified");
+  if (etag && !headers.has("if-none-match")) headers.set("if-none-match", etag);
+  if (modified && !headers.has("if-modified-since")) {
+    headers.set("if-modified-since", modified);
+  }
+  return new Request(request, { headers });
+}
+
+/** Applies metadata a 304 is allowed to update while retaining the cached body. */
+function mergeNotModified(cached: Response, notModified: Response): Response {
+  const headers = new Headers(cached.headers);
+  for (const [name, value] of notModified.headers) {
+    if (name.toLowerCase() === "content-length") continue;
+    headers.set(name, value);
+  }
+  return new Response(cached.body, {
+    status: cached.status,
+    statusText: cached.statusText,
+    headers
+  });
 }
 
 /**
@@ -634,25 +724,45 @@ function redirectToLoaderShell(requested: URL): Response {
   return Response.redirect(loaderShellUrl(requested).href, 302);
 }
 
-async function revalidate(
+const revalidations = new Map<string, Promise<void>>();
+
+function revalidate(
   request: Request,
   policy: "stale-while-revalidate",
-  logicalPath: string
+  logicalPath: string,
+  cached: Response
 ): Promise<void> {
-  try {
-    const fresh = await fromTransport(request, logicalPath);
-    if (fresh.ok) await putBounded(request, fresh, policy, cacheBudget());
-  } catch {
-    /* offline or transport down; the stale copy already served */
-  }
+  const key = `${request.method} ${request.url}`;
+  const active = revalidations.get(key);
+  if (active) return active;
+
+  const operation = (async () => {
+    try {
+      const fresh = await fromTransport(conditionalRequest(request, cached), logicalPath);
+      const replacement = fresh.status === 304
+        ? mergeNotModified(cached, fresh)
+        : fresh;
+      if (fresh.status !== 304 && responseForbidsStoredFallback(fresh)) {
+        await removeCached(request, policy);
+        return;
+      }
+      if (replacement.ok) {
+        await putBounded(request, replacement, policy, cacheBudget());
+      }
+    } catch {
+      /* offline or transport down; the stale copy already served */
+    }
+  })();
+  revalidations.set(key, operation);
+  void operation.finally(() => {
+    if (revalidations.get(key) === operation) revalidations.delete(key);
+  });
+  return operation;
 }
 
 async function fromTransport(request: Request, logicalPath: string): Promise<Response> {
   const head = await buildHead(request, logicalPath);
-  const body =
-    request.method === "GET" || request.method === "HEAD"
-      ? undefined
-      : request.body ?? undefined;
+  const body = await requestBodyForTransport(request);
 
   const { head: responseHead, body: stream } = await bridge.request(
     head,
@@ -670,6 +780,7 @@ async function fromTransport(request: Request, logicalPath: string): Promise<Res
     await applySetCookie(value).catch(() => undefined);
   }
 
+  const wireEncoding = headerValue(responseHead.headers, WIRE_CONTENT_ENCODING_HEADER);
   const headers = responseHeaders(responseHead.headers);
   const location = headers.get("location");
   if (location) {
@@ -685,7 +796,17 @@ async function fromTransport(request: Request, logicalPath: string): Promise<Res
     throw new Error(`unsupported HTTP response status: ${responseHead.status}`);
   }
 
-  return new Response(canHaveBody ? stream : null, {
+  let responseBody: ReadableStream<Uint8Array> | null = canHaveBody ? stream : null;
+  if (responseBody && wireEncoding) {
+    try {
+      responseBody = decodeWireBody(responseBody, wireEncoding);
+    } catch (error) {
+      await stream.cancel(error).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  return new Response(responseBody, {
     status: responseHead.status,
     statusText: responseHead.statusText,
     headers
@@ -698,6 +819,10 @@ async function buildHead(request: Request, logicalPath: string): Promise<Request
 
   // Never forward a browser-managed Cookie header; ours is authoritative.
   headers = withoutHeader(headers, "cookie");
+  headers = withoutHeader(headers, WIRE_ACCEPT_ENCODING_HEADER);
+  if (supportsWireGzip()) {
+    headers = [...headers, [WIRE_ACCEPT_ENCODING_HEADER, "gzip"] as const];
+  }
   // Static files cannot use the backend's session, so avoid opening IndexedDB
   // for every image, script, font, and cover on the page hot path.
   if (logicalPath === "/apiv2" || logicalPath.startsWith("/apiv2/")) {

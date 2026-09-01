@@ -1,12 +1,26 @@
 {
-  "name": "@edurocks-group/loader",
-  "version": "0.5.1",
+  "name": "@advwebrec/grainloading",
+  "version": "0.5.2",
   "type": "module",
-  "description": "YuriRTC browser client and service worker transport. The package name is retained for deployed-client compatibility.",
+  "description": "YuriRTC browser client and service worker transport.",
   "license": "AGPL-3.0-only",
+  "contentPolicy": {
+    "class": "dual-use"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EDUrocks-Group/YuriRTC.git",
+    "directory": "packages/loader"
+  },
+  "homepage": "https://github.com/EDUrocks-Group/YuriRTC#readme",
+  "bugs": {
+    "url": "https://github.com/EDUrocks-Group/YuriRTC/issues"
+  },
   "main": "./dist/bundle/client.js",
   "types": "./dist/types/index.d.ts",
   "files": [
+    "DISCLOSURE",
+    "LICENSE",
     "dist/bundle/client.js",
     "dist/bundle/sw.js",
     "dist/bundle/sw-stub.js",

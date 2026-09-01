@@ -78,14 +78,19 @@ interface ClientInternals {
   registration: ServiceWorkerRegistration | undefined;
   transportDown: boolean;
   connectionGeneration: number;
+  bulkIdleTimer: ReturnType<typeof setTimeout> | null;
   channelLoads: Map<RTCDataChannel, number>;
   direct: Map<number, (message: PageToSw) => void>;
   requestBySw: Map<number, number>;
   swByRequest: Map<number, number>;
   requestAbortControllers: Map<number, AbortController>;
   uploads: Map<number, unknown>;
+  startingRequests: Map<number, { cancelled: boolean }>;
+  sockets: Map<number, unknown>;
   inbound: Map<number, { swId: number; channel: RTCDataChannel }>;
   outbound: Map<number, { credit: number }>;
+  adaptiveTcpPending: boolean;
+  successor: YuriRTCClient | null;
   post(message: PageToSw, transfer?: Transferable[]): void;
   startRequest(
     swId: number,
@@ -111,12 +116,88 @@ interface ClientInternals {
   handleIceConnectionState(pc: Pick<RTCPeerConnection, "iceConnectionState">): void;
   prepareChannel(channel: RTCDataChannel, lane: number, generation?: number): Promise<void>;
   ensureBulkChannels(): Promise<void>;
-  chooseChannel(priority: RequestPriority): RTCDataChannel | null;
+  chooseChannel(priority: RequestPriority, logicalPath?: string): RTCDataChannel | null;
   teardown(reason: string): void;
+  maybeNotifyDrained(): void;
 }
 
 test("legacy LoaderClient export aliases the preferred YuriRTCClient", () => {
   assert.equal(LoaderClient, YuriRTCClient);
+});
+
+test("adaptive TCP warm-up starts immediately while old work drains separately", async () => {
+  const client = new YuriRTCClient(CONFIG);
+  const internal = client as unknown as ClientInternals;
+  const channel = fakeDataChannel(`${DATA_CHANNEL_LABEL_PREFIX}0`, "open");
+  let suggestions = 0;
+  internal.adaptiveTcpPending = true;
+  internal.inbound.set(1, { swId: 1, channel });
+  client.onAdaptiveTcpSuggested(() => { suggestions += 1; });
+  await Promise.resolve();
+  assert.equal(suggestions, 1, "background TCP warm-up waited for the active response");
+
+  let drains = 0;
+  client.onDrained(() => { drains += 1; });
+  await Promise.resolve();
+  assert.equal(drains, 0);
+  internal.inbound.clear();
+  internal.maybeNotifyDrained();
+  assert.equal(drains, 1, "the predecessor did not report its independent drain");
+});
+
+test("promotion keeps an old GET on UDP while routing a new GET to its successor", async () => {
+  const oldClient = new YuriRTCClient(CONFIG);
+  const successor = new YuriRTCClient(CONFIG);
+  const old = oldClient as unknown as ClientInternals;
+  const next = successor as unknown as ClientInternals;
+  const oldStarts: number[] = [];
+  const newStarts: number[] = [];
+  old.startRequest = async (id) => { oldStarts.push(id); };
+  next.startRequest = async (id) => { newStarts.push(id); };
+  const head = {
+    version: PROTOCOL_VERSION,
+    method: "GET",
+    url: "/asset.js",
+    headers: [],
+    hasBody: false,
+    priority: RequestPriority.Critical,
+    initialCredits: 8
+  } satisfies RequestHead;
+
+  old.onSwMessage({ t: "req", id: 1, head });
+  oldClient.adoptSuccessor(successor);
+  old.onSwMessage({ t: "req", id: 2, head });
+  await Promise.resolve();
+
+  assert.deepEqual(oldStarts, [1]);
+  assert.deepEqual(newStarts, [2]);
+});
+
+test("a draining predecessor failure does not send global DOWN or disconnect its successor", () => {
+  const oldClient = new YuriRTCClient(CONFIG);
+  const successor = new YuriRTCClient(CONFIG);
+  const old = oldClient as unknown as ClientInternals;
+  const next = successor as unknown as ClientInternals;
+  next.channel = fakeDataChannel(`${DATA_CHANNEL_LABEL_PREFIX}0`, "open");
+  oldClient.adoptSuccessor(successor);
+  const posted: PageToSw[] = [];
+  old.post = (message) => posted.push(message);
+  old.swByRequest.set(41, 7);
+  old.requestBySw.set(7, 41);
+  old.inbound.set(41, {
+    swId: 7,
+    channel: fakeDataChannel(`${DATA_CHANNEL_LABEL_PREFIX}2`, "open")
+  });
+  let disconnects = 0;
+  oldClient.onDisconnect(() => { disconnects += 1; });
+
+  old.teardown("old UDP route failed");
+
+  assert.equal(posted.some((message) => message.t === "down"), false);
+  assert.deepEqual(posted.filter((message) => message.t === "err").map((message) => message.id), [7]);
+  assert.equal(disconnects, 0);
+  assert.equal(next.channel?.readyState, "open");
+  assert.equal(old.transportDown, false, "the healthy successor lost its SW-router attachment guard");
 });
 
 test("a page rejects a mismatched-protocol worker acknowledgement before sending ready", async () => {
@@ -235,6 +316,40 @@ test("a standby election keeps the losing tab connected without owning a port", 
   assert.equal(internal.port, null);
   assert.equal(internal.transportDown, false);
   client.close();
+});
+
+test("a configured same-origin recovery client precedes inline and CDN sources", async () => {
+  const durable = "https://bucket.invalid/release/client.js";
+  const client = new YuriRTCClient({
+    ...CONFIG,
+    recovery: { clientUrls: [durable, durable, ""] }
+  });
+  const internal = client as unknown as ClientInternals;
+  let bootstrap: { clientUrls?: string[] } | undefined;
+  const worker = {
+    state: "activated",
+    postMessage(message: { t?: string; bootstrap?: { clientUrls?: string[] } }, transfer: Transferable[]) {
+      const port = transfer[0] as MessagePort;
+      port.start();
+      if (message.t === "attach") {
+        port.postMessage({ t: "attached", protocolVersion: PROTOCOL_VERSION });
+        return;
+      }
+      assert.equal(message.t, "bootstrap");
+      bootstrap = message.bootstrap;
+      port.postMessage({ t: "bootstrapped", protocolVersion: PROTOCOL_VERSION });
+    }
+  } as unknown as ServiceWorker;
+
+  try {
+    await internal.attachPortToWorker(worker, internal.connectionGeneration);
+    assert.equal(bootstrap?.clientUrls?.[0], durable);
+    assert.equal(bootstrap?.clientUrls?.filter((url) => url === durable).length, 1);
+    assert.ok(bootstrap?.clientUrls?.some((url) => url.startsWith("https://unpkg.com/")));
+    assert.ok(bootstrap?.clientUrls?.some((url) => url.startsWith("https://cdn.jsdelivr.net/")));
+  } finally {
+    client.close();
+  }
 });
 
 test("a losing former carrier retires old bridge work without reporting ids to the winner", async () => {
@@ -655,7 +770,7 @@ test("a lane-zero close from an old generation cannot tear down the new lane", a
   assert.equal(internal.channel, currentLane);
 });
 
-test("bulk lanes are lazy and the scheduler reserves lane zero for interaction", async () => {
+test("bulk lane construction reserves lane zero and lane one by request class", async () => {
   const client = new YuriRTCClient(CONFIG);
   const internal = client as unknown as ClientInternals;
   const made: Array<RTCDataChannel & { readyState: RTCDataChannelState }> = [];
@@ -682,14 +797,20 @@ test("bulk lanes are lazy and the scheduler reserves lane zero for interaction",
   assert.equal(internal.channels.length, 1, "an idle peer owns only the persistent lane");
   await internal.ensureBulkChannels();
   assert.equal(internal.channels.length, DATA_CHANNEL_COUNT);
+  assert.notEqual(internal.bulkIdleTimer, null, "eager bulk lanes were left open indefinitely");
   assert.deepEqual(
     made.map((channel) => channel.label),
     [1, 2, 3].map((lane) => `${DATA_CHANNEL_LABEL_PREFIX}${lane}`)
   );
   assert.equal(internal.chooseChannel(RequestPriority.Interactive), primary);
-  assert.notEqual(internal.chooseChannel(RequestPriority.Bulk), primary);
+  assert.equal(internal.chooseChannel(RequestPriority.Critical, "/app.js"), made[0]);
+  assert.ok(
+    [made[1], made[2]].includes(internal.chooseChannel(RequestPriority.Bulk, "/game.data") as MutableChannel),
+    "incremental work consumed the small-critical reserve"
+  );
 
   for (const channel of made) channel.close();
+  if (internal.bulkIdleTimer !== null) clearTimeout(internal.bulkIdleTimer);
 });
 
 test("critical requests use lane zero while bulk lanes open; bulk requests wait", async () => {
@@ -722,9 +843,10 @@ test("critical requests use lane zero while bulk lanes open; bulk requests wait"
     initialCredits: 32
   };
   const started = internal.startRequest(21, critical);
-  // The render-blocking REQ must leave synchronously on the open interactive
-  // lane, while the same call still kicks the bulk lanes open behind it.
+  // The render-blocking REQ uses the only open lane while the same call kicks
+  // the reserved/bulk lanes open behind it.
   assert.equal(made.length, DATA_CHANNEL_COUNT - 1, "the critical request opens the bulk lanes");
+  await Promise.resolve();
   assert.equal(sent.length, 1, "the critical REQ must not wait for lane opening");
   assert.equal(sent[0]!.frame.type, FrameType.Req);
   assert.equal(sent[0]!.channel, primary);
@@ -746,6 +868,57 @@ test("critical requests use lane zero while bulk lanes open; bulk requests wait"
   assert.notEqual(sent[1]!.channel, primary, "bulk stays off the interactive lane");
 
   for (const channel of made) channel.close();
+});
+
+test("bulk starts are FIFO-bounded to two lanes and a cancelled waiter never starts", async () => {
+  const client = new YuriRTCClient(CONFIG);
+  const internal = client as unknown as ClientInternals;
+  const channels = [0, 1, 2, 3].map((lane) =>
+    fakeDataChannel(`${DATA_CHANNEL_LABEL_PREFIX}${lane}`, "open")
+  );
+  internal.channel = channels[0]!;
+  internal.channels = channels;
+  for (const channel of channels) internal.channelLoads.set(channel, 0);
+  internal.ensureBulkChannels = async () => undefined;
+  const sent: Array<{
+    frame: ReturnType<typeof decodeFrame>;
+    channel: RTCDataChannel | undefined;
+  }> = [];
+  internal.send = (frame, channel) => sent.push({ frame: decodeFrame(frame), channel });
+  const head = {
+    version: PROTOCOL_VERSION,
+    method: "GET",
+    url: "/game.data",
+    headers: [],
+    hasBody: false,
+    priority: RequestPriority.Bulk,
+    initialCredits: 8
+  } satisfies RequestHead;
+
+  const first = internal.startRequest(1, head);
+  const second = internal.startRequest(2, head);
+  const third = internal.startRequest(3, head);
+  const fourth = internal.startRequest(4, head);
+  await Promise.all([first, second]);
+  await Promise.resolve();
+  assert.equal(sent.length, 2);
+  assert.deepEqual(new Set(sent.map((entry) => entry.channel)), new Set([channels[2], channels[3]]));
+
+  internal.cancelRequest(1);
+  await third;
+  assert.equal(sent.length, 4, "FIFO waiter did not receive the first released slot");
+  // CANCEL for request one is the third frame; request three's REQ follows it.
+  assert.equal(sent[3]!.frame.type, FrameType.Req);
+  internal.cancelRequest(4);
+  await fourth;
+  assert.equal(
+    sent.filter((entry) => entry.frame.type === FrameType.Req).length,
+    3,
+    "cancelled waiter started on the wire"
+  );
+
+  internal.cancelRequest(2);
+  internal.cancelRequest(3);
 });
 
 test("a failed bulk lane is replaced without duplicating lanes still opening", async () => {

@@ -1,4 +1,5 @@
 import type { FirestoreConfig, RtdbConfig } from "@yurirtc/signaling";
+import type { GoodputMonitorOptions } from "./adaptive-transport.js";
 
 export interface YuriRTCConfig {
   /** Public by design; the security rules enforce access, not the key. */
@@ -22,6 +23,20 @@ export interface YuriRTCConfig {
     hedgeDelayMs?: number;
     rtdb?: Partial<RtdbConfig>;
     firestore?: Partial<FirestoreConfig>;
+  };
+  /**
+   * Durable module locations used when the service worker injects YuriRTC into
+   * a transported document. A self-contained carrier puts its same-origin
+   * client first here so recovery never depends on the public npm CDNs.
+   */
+  recovery?: {
+    clientUrls?: string[];
+  };
+  transport?: {
+    adaptiveTcp?: GoodputMonitorOptions & {
+      /** Set false to retain ICE's normal UDP-first choice without measuring. */
+      enabled?: boolean;
+    };
   };
 }
 
@@ -98,12 +113,23 @@ export const DEFAULT_CACHE = {
 };
 
 export function resolveConfig(partial: YuriRTCConfig): YuriRTCConfig {
+  const recoveryClientUrls = Array.isArray(partial.recovery?.clientUrls)
+    ? [...new Set(partial.recovery.clientUrls
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0 && value.length <= 2048))]
+        .slice(0, 4)
+    : [];
   return {
     firebase: partial.firebase,
     cache: {
       lruBudgetBytes: partial.cache?.lruBudgetBytes ?? DEFAULT_CACHE.budgetBytes,
       maxQuotaShare: partial.cache?.maxQuotaShare ?? DEFAULT_CACHE.maxQuotaShare
     },
-    signal: partial.signal ?? {}
+    signal: partial.signal ?? {},
+    ...(recoveryClientUrls.length > 0
+      ? { recovery: { clientUrls: recoveryClientUrls } }
+      : {}),
+    ...(partial.transport ? { transport: partial.transport } : {})
   };
 }

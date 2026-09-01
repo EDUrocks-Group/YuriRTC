@@ -3,8 +3,12 @@ import test from "node:test";
 
 import {
   cacheWhileConsumed,
+  cachedResponseIsFresh,
   contentLength,
-  putBounded
+  effectiveBudget,
+  putBounded,
+  responseForbidsStoredFallback,
+  responseMayBeStored
 } from "../src/cache.js";
 import { injectInto, injectIntoStream } from "../src/inject.js";
 
@@ -46,6 +50,72 @@ test("missing or malformed Content-Length is unknown rather than zero", () => {
   assert.equal(contentLength(new Headers()), undefined);
   assert.equal(contentLength(new Headers({ "content-length": "garbage" })), undefined);
   assert.equal(contentLength(new Headers({ "content-length": "1909675" })), 1_909_675);
+});
+
+test("a stalled quota estimate cannot block cache admission", async () => {
+  const priorNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { storage: { estimate: () => new Promise(() => undefined) } }
+  });
+  const config = { budgetBytes: 123_456_789, maxQuotaShare: 0.5 };
+  const started = performance.now();
+  try {
+    assert.equal(await effectiveBudget(config), config.budgetBytes);
+    assert.ok(performance.now() - started < 1_500, "quota fallback exceeded its bound");
+  } finally {
+    if (priorNavigator) Object.defineProperty(globalThis, "navigator", priorNavigator);
+    else delete (globalThis as { navigator?: unknown }).navigator;
+  }
+});
+
+test("universal cache admission rejects private and non-reusable responses", () => {
+  const request = new Request("https://example.test/assets/app.js");
+  assert.equal(responseMayBeStored(request, new Response("ok")), true);
+  assert.equal(responseMayBeStored(
+    request,
+    new Response("secret", { headers: { "cache-control": "private, max-age=60" } })
+  ), false);
+  assert.equal(responseMayBeStored(
+    request,
+    new Response("no", { headers: { vary: "*" } })
+  ), false);
+  assert.equal(responseMayBeStored(
+    new Request(request, { headers: { authorization: "Bearer private" } }),
+    new Response("no")
+  ), false);
+  assert.equal(responseMayBeStored(
+    request,
+    new Response("events", { headers: { "content-type": "text/event-stream" } })
+  ), false);
+  assert.equal(responseForbidsStoredFallback(new Response("gone", { status: 404 })), true);
+  assert.equal(responseForbidsStoredFallback(
+    new Response("secret", { headers: { "cache-control": "no-store" } })
+  ), true);
+  assert.equal(responseForbidsStoredFallback(new Response("temporary", { status: 503 })), false);
+});
+
+test("HTTP-semantics entries are fresh only for an explicit live lifetime", () => {
+  const now = Date.parse("2026-08-30T12:00:30Z");
+  assert.equal(cachedResponseIsFresh(new Response("x", { headers: {
+    date: "Sun, 30 Aug 2026 12:00:00 GMT",
+    "cache-control": "public, max-age=60"
+  } }), now), true);
+  assert.equal(cachedResponseIsFresh(new Response("x", { headers: {
+    date: "Sun, 30 Aug 2026 12:00:00 GMT",
+    "cache-control": "public, max-age=10"
+  } }), now), false);
+  assert.equal(cachedResponseIsFresh(new Response("x", { headers: {
+    date: "Sun, 30 Aug 2026 12:00:00 GMT",
+    "cache-control": "public, max-age=600, must-revalidate"
+  } }), now), true);
+  assert.equal(cachedResponseIsFresh(new Response("x", { headers: {
+    date: "Sun, 30 Aug 2026 11:00:00 GMT",
+    "cache-control": "public, max-age=600, must-revalidate"
+  } }), now), false);
+  assert.equal(cachedResponseIsFresh(new Response("x", { headers: {
+    "cache-control": "public, max-age=31536000, immutable"
+  } }), now), true);
 });
 
 test("putBounded consumes its caller-owned response without cloning it again", async () => {

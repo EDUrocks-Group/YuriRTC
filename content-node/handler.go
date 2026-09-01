@@ -62,6 +62,7 @@ type Handler struct {
 	WebSocketURL string
 	client       *http.Client
 	bulkSlots    chan struct{}
+	wireGzip     *wireGzipCache
 }
 
 // responseSender is the transport-facing subset Handler needs. Session is the
@@ -90,11 +91,16 @@ type peerAddressSource interface {
 	PeerAddress() string
 }
 
+type routeProbeClaimer interface {
+	ClaimRouteProbe() bool
+}
+
 func NewHandler(root, backendURL string) *Handler {
 	return &Handler{
 		Root:       root,
 		BackendURL: strings.TrimRight(backendURL, "/"),
 		bulkSlots:  make(chan struct{}, maxGlobalBulkResponses),
+		wireGzip:   newWireGzipCache(),
 		client: &http.Client{
 			// No global timeout: /apiv2/ai and /apiv2/chat are SSE and stream
 			// indefinitely. Cancellation comes from the request context.
@@ -118,6 +124,12 @@ func NewHandler(root, backendURL string) *Handler {
 }
 
 func (h *Handler) Serve(ctx context.Context, out responseSender, id uint32, head RequestHead, body io.ReadCloser) error {
+	if _, present := joinedHeaderValue(head.Headers, routeProbeHeader); present {
+		if body != nil {
+			_ = body.Close()
+		}
+		return h.routeProbe(ctx, out, id, head)
+	}
 	path, query := splitPath(head.URL)
 	if strings.HasPrefix(path, apiPrefix+"/") || path == apiPrefix {
 		return h.proxy(ctx, out, id, head, path, query, body)
@@ -169,6 +181,33 @@ func (h *Handler) static(ctx context.Context, out responseSender, id uint32, hea
 	}
 
 	size := info.Size()
+	representationType := contentType(full)
+	etag := staticETag(info)
+	lastModified := info.ModTime().UTC().Format(http.TimeFormat)
+	cacheControl := staticCacheControl(urlPath)
+	baseHeaders := func() HeaderPairs {
+		return HeaderPairs{
+			{"content-type", representationType},
+			{"accept-ranges", "bytes"},
+			{"date", time.Now().UTC().Format(http.TimeFormat)},
+			{"etag", etag},
+			{"last-modified", lastModified},
+			{"cache-control", cacheControl},
+		}
+	}
+
+	// RFC 9110 gives If-None-Match precedence over If-Modified-Since. Apply
+	// both before Range so a cached complete representation can be validated
+	// without opening the file or consuming a bulk-response slot.
+	if requestNotModified(head, etag, info.ModTime()) {
+		if err := out.SendHead(id, ResponseHead{
+			Status: http.StatusNotModified, StatusText: "Not Modified", Headers: baseHeaders(),
+		}); err != nil {
+			return err
+		}
+		return out.SendEnd(id)
+	}
+
 	status := http.StatusOK
 	statusText := "OK"
 	start, end := int64(0), size-1
@@ -178,7 +217,7 @@ func (h *Handler) static(ctx context.Context, out responseSender, id uint32, hea
 	if raw := headerValue(head.Headers, "range"); raw != "" {
 		s, e, ok := parseRange(raw, size)
 		if !ok {
-			pairs := HeaderPairs{{"content-range", fmt.Sprintf("bytes */%d", size)}}
+			pairs := append(baseHeaders(), [2]string{"content-range", fmt.Sprintf("bytes */%d", size)})
 			if err := out.SendHead(id, ResponseHead{
 				Status: http.StatusRequestedRangeNotSatisfiable, StatusText: "Range Not Satisfiable", Headers: pairs,
 			}); err != nil {
@@ -191,6 +230,8 @@ func (h *Handler) static(ctx context.Context, out responseSender, id uint32, hea
 	}
 
 	length := end - start + 1
+	wireGzip := false
+	var compressed []byte
 	if head.Method != http.MethodHead && length >= bulkResponseThreshold {
 		if limiter, ok := out.(bulkResponseLimiter); ok {
 			release, err := limiter.AcquireBulk(ctx)
@@ -229,24 +270,54 @@ func (h *Handler) static(ctx context.Context, out responseSender, id uint32, hea
 		if length >= bulkResponseThreshold {
 			_ = hintSequentialRead(file, start, length)
 		}
+
+		// This is a private transport encoding, not HTTP Content-Encoding. Old
+		// clients never opt in and continue to receive the byte-identical file;
+		// ranges retain their original offsets and are never transformed.
+		wireGzip = status == http.StatusOK &&
+			acceptsWireGzip(head.Headers) &&
+			!requestCacheControlHasDirective(head.Headers, "no-transform") &&
+			isWireGzipType(representationType) && length >= minWireGzipBytes
+		if wireGzip && h.wireGzip != nil && length <= maxWireGzipCacheSourceBytes {
+			key := wireGzipCacheKey{path: full, size: size, modTimeNS: info.ModTime().UnixNano()}
+			compressed, wireGzip, err = h.wireGzip.load(ctx, key, func() ([]byte, bool, error) {
+				return compressWireGzip(file, length)
+			})
+			if err != nil {
+				return err
+			}
+			if !wireGzip {
+				if _, err := file.Seek(start, io.SeekStart); err != nil {
+					return err
+				}
+			}
+		}
 	}
-	headers := HeaderPairs{
-		{"content-type", contentType(full)},
-		{"content-length", strconv.FormatInt(length, 10)},
-		{"accept-ranges", "bytes"},
-		{"last-modified", info.ModTime().UTC().Format(http.TimeFormat)},
-	}
+	headers := baseHeaders()
+	headers = append(headers, [2]string{"content-length", strconv.FormatInt(length, 10)})
 	if status == http.StatusPartialContent {
 		headers = append(headers, [2]string{"content-range", fmt.Sprintf("bytes %d-%d/%d", start, end, size)})
 	}
-	if isImmutable(urlPath) {
-		headers = append(headers, [2]string{"cache-control", "public, max-age=31536000, immutable"})
+	if wireGzip {
+		headers = append(headers, [2]string{wireEncodingHeader, wireGzipEncoding})
 	}
 
 	if err := out.SendHead(id, ResponseHead{Status: status, StatusText: statusText, Headers: headers}); err != nil {
 		return err
 	}
 	if head.Method == http.MethodHead {
+		return out.SendEnd(id)
+	}
+	if len(compressed) > 0 {
+		if err := streamEncodedBytes(ctx, out, id, compressed); err != nil {
+			return err
+		}
+		return out.SendEnd(id)
+	}
+	if wireGzip {
+		if err := streamWireGzip(ctx, out, id, file, length); err != nil {
+			return err
+		}
 		return out.SendEnd(id)
 	}
 	// Only regular files use the direct 128 KiB frame path. Proxy readers may
@@ -289,7 +360,7 @@ func (h *Handler) proxy(ctx context.Context, out responseSender, id uint32, head
 		// a peer sending "X-Forwarded-For" in any casing would otherwise reach
 		// the backend under the same canonical key a case-sensitive check missed.
 		name := strings.ToLower(pair[0])
-		if isHopByHop(name) || name == "host" || isForwardingHeader(name) {
+		if isHopByHop(name) || isWireInternalHeader(name) || name == "host" || isForwardingHeader(name) {
 			continue
 		}
 		request.Header.Add(name, pair[1])
@@ -322,6 +393,12 @@ func (h *Handler) proxy(ctx context.Context, out responseSender, id uint32, head
 	}
 	defer response.Body.Close()
 
+	// Private transport negotiation ends at this node. A backend cannot opt a
+	// loader into decoding an API body, and the capability header never leaks
+	// into application authentication or cache behavior.
+	response.Header.Del(wireAcceptEncodingHeader)
+	response.Header.Del(wireEncodingHeader)
+	response.Header.Del(routeProbeHeader)
 	headers := headerPairsFrom(response.Header)
 	// Set-Cookie is deliberately preserved here: the SW reads it off the frame
 	// and stores it, because the browser ignores it on a synthesized Response.
@@ -443,6 +520,17 @@ func parseRange(raw string, size int64) (int64, int64, bool) {
 
 func isImmutable(urlPath string) bool {
 	return strings.HasPrefix(urlPath, "/a/")
+}
+
+func staticCacheControl(urlPath string) string {
+	if isImmutable(urlPath) {
+		return "public, max-age=31536000, immutable"
+	}
+	// Generic hosted sites cannot rely on EDUrocks-specific path conventions.
+	// Permit storage but require validation on every normal use, so arbitrary
+	// HTML and unhashed assets update immediately while repeat requests can use
+	// a bodyless 304 response.
+	return "public, max-age=0, must-revalidate"
 }
 
 // peerAddressHeader carries the visitor's address to the backend.

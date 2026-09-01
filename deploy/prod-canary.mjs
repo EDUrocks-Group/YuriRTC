@@ -8,6 +8,11 @@ import {
   installCanaryProtocolFilter,
   normalizeCanaryProtocol
 } from "./prod-canary-protocol.mjs";
+import {
+  fromBase64url,
+  publicKeyFromBase64url,
+  verifyManifest
+} from "../packages/integrity/manifest-crypto.mjs";
 
 const carrierDir = process.argv[2];
 assert.ok(carrierDir, "usage: node deploy/prod-canary.mjs CARRIER_DIR [EXPECTED_LOADER_VERSION]");
@@ -17,23 +22,26 @@ const repositoryLoader = JSON.parse(
 );
 const expectedLoaderVersion = process.argv[3] ?? String(repositoryLoader.version);
 assert.match(expectedLoaderVersion, /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
-// The carrier's worker stub imports the moving `@latest` worker URL by design
-// (deploy/npm/src/sw.js), so the version under test is whatever both CDNs
-// currently resolve `latest` to. Verify that resolution directly up front; the
-// in-page worker request is separately asserted to have followed the moving
-// tag rather than a stale pinned copy.
+const publicConfiguration = JSON.parse(
+  await readFile(new URL("./npm/manifest-public-key.json", import.meta.url), "utf8")
+);
+const manifestPublicKey = publicKeyFromBase64url(publicConfiguration.spki);
+// Both moving pointer URLs must carry a valid signature over the expected
+// immutable loader version before the browser canary runs.
 for (const source of [
-  "https://cdn.jsdelivr.net/npm/@edurocks-group/loader@latest/package.json",
-  "https://unpkg.com/@edurocks-group/loader@latest/package.json"
+  "https://cdn.jsdelivr.net/npm/shaintloadingcheckpak@latest/loader.json",
+  "https://unpkg.com/shaintloadingcheckpak@latest/loader.json"
 ]) {
   const hostname = new URL(source).hostname;
   const response = await fetch(source, { redirect: "follow" });
-  assert.ok(response.ok, `CDN latest metadata request failed: ${hostname}`);
-  const { version } = await response.json();
+  assert.ok(response.ok, `signed pointer request failed: ${hostname}`);
+  const manifest = await response.json();
+  assert.equal(verifyManifest(manifest, manifestPublicKey), true, `${hostname} pointer signature is invalid`);
+  const { loader } = JSON.parse(fromBase64url(manifest.payload).toString("utf8"));
   assert.equal(
-    version,
+    loader.version,
     expectedLoaderVersion,
-    `${hostname} resolves latest to ${version}, expected ${expectedLoaderVersion}`
+    `${hostname} points to ${loader.version}, expected ${expectedLoaderVersion}`
   );
 }
 
@@ -121,11 +129,11 @@ const classifyRequest = (requestUrl) => {
   const cdn = url.hostname === "cdn.jsdelivr.net" || url.hostname === "unpkg.com";
   if (cdn) {
     const path = url.pathname.replace(/^\/npm\//, "/");
-    const prefix = "/@edurocks-group/loader@";
-    if (path === `${prefix}latest/package.json`) cdnRequests.metadata += 1;
-    if (path === `${prefix}latest/dist/bundle/client.js`) cdnRequests.client += 1;
-    if (path === `${prefix}latest/dist/assets/rot13.woff`) cdnRequests.font += 1;
-    const worker = path.match(/^\/@edurocks-group\/loader@([^/]+)\/dist\/bundle\/sw\.js$/);
+    const prefix = "/@advwebrec/grainloading@";
+    if (path === "/shaintloadingcheckpak@latest/loader.json") cdnRequests.metadata += 1;
+    if (path === `${prefix}${expectedLoaderVersion}/dist/bundle/client.js`) cdnRequests.client += 1;
+    if (path === `${prefix}${expectedLoaderVersion}/dist/assets/rot13.woff`) cdnRequests.font += 1;
+    const worker = path.match(/^\/@advwebrec\/grainloading@([^/]+)\/dist\/bundle\/sw\.js$/);
     if (worker) {
       cdnRequests.worker += 1;
       workerVersions.add(worker[1]);
@@ -220,9 +228,7 @@ try {
   assert.ok(cdnRequests.client > 0, "published loader client was not fetched from a live CDN");
   assert.ok(cdnRequests.worker > 0, "immutable worker was not fetched from a live CDN");
   assert.ok(cdnRequests.font > 0, "published loader font was not fetched from a live CDN");
-  // Since f0c2e1e the stub must follow the moving tag; a pinned version here
-  // would mean an old stub is still resolving and freezing carriers again.
-  assert.deepEqual([...workerVersions], ["latest"]);
+  assert.deepEqual([...workerVersions], [expectedLoaderVersion]);
   assert.ok(
     firebaseRequests.auth + firebaseRequests.firestore + firebaseRequests.rtdb > 0,
     "no request reached the real Firebase signaling services"

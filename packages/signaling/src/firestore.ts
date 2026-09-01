@@ -22,6 +22,12 @@ import { anySignal } from "./rtdb.js";
 
 export interface FirestoreConfig {
   projectId: string;
+  /**
+   * Firestore-compatible REST root. Defaults to Google's service. A
+   * root-relative value is resolved against the page origin, which lets
+   * self-hosted deployments proxy signaling without changing this client.
+   */
+  baseUrl?: string;
   /** First poll is deferred by this much; the node is usually done by then. */
   firstPollMs?: number;
   /** Initial interval between subsequent polls. Every poll is a billed read. */
@@ -49,8 +55,9 @@ export class FirestoreBackend implements SignalBackend {
 
     const combined = anySignal([signal, AbortSignal.timeout(timeout)]);
     const capability = randomId(16);
+    const serviceRoot = firestoreServiceRoot(this.config.baseUrl);
     const base =
-      `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(this.config.projectId)}` +
+      `${serviceRoot}/v1/projects/${encodeURIComponent(this.config.projectId)}` +
       `/databases/(default)/documents/signal/${capability}`;
 
     const payload = JSON.stringify(offer);
@@ -122,6 +129,20 @@ export class FirestoreBackend implements SignalBackend {
     }
     return answer;
   }
+}
+
+export function firestoreServiceRoot(configured?: string): string {
+  if (!configured) return "https://firestore.googleapis.com";
+  const fallback = typeof globalThis.location?.origin === "string"
+    ? globalThis.location.origin
+    : "https://firestore.googleapis.com";
+  const parsed = new URL(configured, fallback);
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new SignalError("Firestore base URL must use HTTP or HTTPS", "firestore");
+  }
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.href.replace(/\/+$/, "");
 }
 
 export function nextPollInterval(current: number, maximum: number): number {

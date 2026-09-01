@@ -56,7 +56,13 @@ test("a successful manual retry after initial failure still mounts the app", asy
     }),
     replaceGlobal("document", { createElement: () => frame }),
     replaceGlobal("crossOriginIsolated", true),
-    replaceGlobal("sessionStorage", { removeItem() {} }),
+    replaceGlobal("sessionStorage", {
+      getItem() {
+        return JSON.stringify({ transport: "auto", expiresAt: Date.now() + 60_000 });
+      },
+      setItem() {},
+      removeItem() {}
+    }),
     replaceGlobal("navigator", {
       onLine: true,
       storage: { persist: async () => true },

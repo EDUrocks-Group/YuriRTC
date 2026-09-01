@@ -1,5 +1,4 @@
-// Build the browser-facing YuriRTC artifacts that are published under the
-// compatibility package name @edurocks-group/loader.
+// Build the browser-facing YuriRTC artifacts published as @advwebrec/grainloading.
 
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -353,7 +352,7 @@ async function roxxieWorkerSection() {
 await bundle("src/sw.ts", "iife", "sw.js");
 await bundle("src/index.ts", "esm", "client.js");
 
-const compatibilityPackage = "@edurocks-group/loader";
+const compatibilityPackage = "@advwebrec/grainloading";
 const workerSources = [
   `https://unpkg.com/${compatibilityPackage}@${version}/dist/bundle/sw.js`,
   `https://cdn.jsdelivr.net/npm/${compatibilityPackage}@${version}/dist/bundle/sw.js`

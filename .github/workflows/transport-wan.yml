@@ -1,0 +1,59 @@
+name: YuriRTC WAN transport regression
+
+on:
+  pull_request:
+    paths:
+      - "content-node/**"
+      - "third_party/pion-sctp/**"
+      - ".github/workflows/transport-wan.yml"
+  push:
+    paths:
+      - "content-node/**"
+      - "third_party/pion-sctp/**"
+      - ".github/workflows/transport-wan.yml"
+  workflow_dispatch:
+    inputs:
+      full_matrix:
+        description: Run burst-loss, reordering, high-RTT, and parallel-lane cases
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  wan-regression:
+    # Never execute untrusted fork code on the persistent EDUrocks machine.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Refuse release credentials in the CI workspace
+        shell: bash
+        run: |
+          if [[ -e .env.release ]]; then
+            echo ".env.release must never exist in a self-hosted CI workspace" >&2
+            exit 1
+          fi
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: content-node/go.mod
+          cache-dependency-path: content-node/go.sum
+      - name: Fast WAN matrix
+        if: ${{ inputs.full_matrix != true }}
+        run: >-
+          env -u YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY
+          -u NPM_LOADER_TOKEN -u NPM_INTEGRITY_TOKEN
+          -u NPM_TOKEN -u NODE_AUTH_TOKEN
+          ./content-node/wan-regression.sh --quick
+      - name: Full WAN matrix
+        if: ${{ inputs.full_matrix == true }}
+        run: >-
+          env -u YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY
+          -u NPM_LOADER_TOKEN -u NPM_INTEGRITY_TOKEN
+          -u NPM_TOKEN -u NODE_AUTH_TOKEN
+          ./content-node/wan-regression.sh --full

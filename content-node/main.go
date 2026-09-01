@@ -24,6 +24,7 @@ import (
 	firebase "firebase.google.com/go/v4"
 	"github.com/pion/ice/v4"
 	"github.com/pion/logging"
+	"github.com/pion/sctp"
 	"github.com/pion/webrtc/v4"
 	"google.golang.org/api/option"
 	"google.golang.org/api/transport"
@@ -82,12 +83,14 @@ type options struct {
 	publicIP     string
 	bindIP       string
 	ports        []int
+	networkTypes []webrtc.NetworkType
 	root         string
 	backendURL   string
 	webSocketURL string
 	projectID    string
 	databaseURL  string
 	credentials  string
+	sctpCC       string
 }
 
 func main() {
@@ -106,6 +109,7 @@ func main() {
 	flag.StringVar(&opt.projectID, "project", yurirtcEnv("PROJECT", ""), "Firebase project id (required)")
 	flag.StringVar(&opt.databaseURL, "database-url", yurirtcEnv("DATABASE_URL", ""), "RTDB URL (required)")
 	flag.StringVar(&opt.credentials, "credentials", yurirtcEnv("CREDENTIALS", envOr("GOOGLE_APPLICATION_CREDENTIALS", "")), "service account JSON path")
+	flag.StringVar(&opt.sctpCC, "sctp-congestion-control", yurirtcEnv("SCTP_CONGESTION_CONTROL", "cubic"), "SCTP sender congestion control: cubic or reno")
 	flag.Parse()
 
 	if opt.publicIP == "" || opt.projectID == "" || opt.databaseURL == "" {
@@ -169,8 +173,8 @@ func main() {
 	}
 	signaler.Run(ctx)
 
-	log.Printf("content node listening on %s ports %s (udp+tcp), advertising %s, root=%s",
-		opt.bindIP, formatPorts(opt.ports), opt.publicIP, opt.root)
+	log.Printf("content node listening on %s ports %s (udp+tcp), advertising %s, root=%s, sctp_cc=%s",
+		opt.bindIP, formatPorts(opt.ports), opt.publicIP, opt.root, rtc.congestionControl)
 	<-ctx.Done()
 	log.Print("shutting down")
 }
@@ -179,11 +183,12 @@ func main() {
 // method, so the muxes must be retained explicitly to release all six sockets
 // during shutdown and in tests.
 type iceTransport struct {
-	API    *webrtc.API
-	udpMux *ice.MultiUDPMuxDefault
-	tcpMux *ice.MultiTCPMuxDefault
-	once   sync.Once
-	err    error
+	API               *webrtc.API
+	udpMux            *ice.MultiUDPMuxDefault
+	tcpMux            *ice.MultiTCPMuxDefault
+	congestionControl string
+	once              sync.Once
+	err               error
 }
 
 func (t *iceTransport) Close() error {
@@ -202,6 +207,10 @@ func (t *iceTransport) Close() error {
 // the port at all.
 func buildTransport(opt options) (*iceTransport, error) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
+	cwndSelector, congestionControl, err := resolveSCTPCongestionControl(opt.sctpCC)
+	if err != nil {
+		return nil, err
+	}
 
 	// Bind the specific address, never the wildcard. A wildcard listener would
 	// collide with any service using the same ports on another local address; a
@@ -244,9 +253,25 @@ func buildTransport(opt options) (*iceTransport, error) {
 	udpMux := ice.NewMultiUDPMuxDefault(udpMuxes...)
 	tcpMux := ice.NewMultiTCPMuxDefault(tcpMuxes...)
 
+	networkTypes := opt.networkTypes
+	if len(networkTypes) == 0 {
+		networkTypes = []webrtc.NetworkType{
+			webrtc.NetworkTypeUDP4,
+			webrtc.NetworkTypeTCP4,
+		}
+	}
 	settings := webrtc.SettingEngine{LoggerFactory: loggerFactory}
-	settings.SetICEUDPMux(udpMux)
-	settings.SetICETCPMux(tcpMux)
+	for _, networkType := range networkTypes {
+		switch networkType {
+		case webrtc.NetworkTypeUDP4:
+			// Pion ICE gathers every attached UDP mux even when its network-type
+			// list excludes UDP. Attach only enabled muxes so diagnostics and
+			// protocol-specific integration tests cannot silently use another path.
+			settings.SetICEUDPMux(udpMux)
+		case webrtc.NetworkTypeTCP4:
+			settings.SetICETCPMux(tcpMux)
+		}
+	}
 
 	// MultiTCPMuxDefault intentionally has no LocalAddr method, so Pion cannot
 	// infer which address its child listeners use. Without this exact filter it
@@ -262,16 +287,16 @@ func buildTransport(opt options) (*iceTransport, error) {
 		[]string{publicIP.String() + "/" + bindIP.String()},
 		webrtc.ICECandidateTypeHost,
 	)
-	settings.SetNetworkTypes([]webrtc.NetworkType{
-		webrtc.NetworkTypeUDP4,
-		webrtc.NetworkTypeTCP4,
-	})
+	settings.SetNetworkTypes(networkTypes)
 	// YuriRTC v3 frames are 128 KiB and Chrome currently negotiates 256 KiB. Advertising
 	// the exact application cap rejects oversized inbound messages before they
 	// can create attacker-controlled reassembly pressure.
 	settings.SetSCTPMaxMessageSize(maxFrameBytes)
 	settings.SetSCTPMaxReceiveBufferSize(sctpMaxReceiveBufferSize)
 	settings.SetSCTPMinCwnd(sctpMinimumCongestionWindow)
+	if cwndSelector != 0 {
+		settings.SetSCTPCwndCAStep(cwndSelector)
+	}
 	// This public server never advertises .local candidates. Query-only mDNS is
 	// otherwise Pion's default and opens three UDP descriptors per peer merely to
 	// resolve browser host candidates. Browser-initiated checks against our
@@ -282,10 +307,22 @@ func buildTransport(opt options) (*iceTransport, error) {
 	settings.SetIncludeLoopbackCandidate(bindIP.IsLoopback())
 
 	return &iceTransport{
-		API:    webrtc.NewAPI(webrtc.WithSettingEngine(settings)),
-		udpMux: udpMux,
-		tcpMux: tcpMux,
+		API:               webrtc.NewAPI(webrtc.WithSettingEngine(settings)),
+		udpMux:            udpMux,
+		tcpMux:            tcpMux,
+		congestionControl: congestionControl,
 	}, nil
+}
+
+func resolveSCTPCongestionControl(value string) (selector uint32, name string, err error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "cubic":
+		return sctp.CwndCAStepUseCUBIC, "cubic", nil
+	case "reno":
+		return 0, "reno", nil
+	default:
+		return 0, "", fmt.Errorf("sctp-congestion-control must be cubic or reno, got %q", value)
+	}
 }
 
 // bindICEListeners is all-or-nothing: a conflict on the sixth socket releases

@@ -1,0 +1,567 @@
+<!doctype html>
+<!--
+  YuriRTC manual port tester — LOCAL DIAGNOSTIC ONLY. DO NOT PUBLISH.
+
+  This file lives under tools/ on purpose: it is not part of the `learnmathedu`
+  npm package (which ships only index.html + sw.js) nor the loader package, so
+  it is never bundled, obfuscated, or published anywhere. It is a developer
+  harness for answering one question from a given network: "does the content
+  node's ICE endpoint reach me on <port> over <UDP|TCP>?"
+
+  How it works
+  ------------
+  The content node advertises host ICE candidates on every configured port over
+  both UDP and TCP, and normally the browser lets ICE pick whichever pair works
+  first. Those server candidates arrive twice: embedded as a=candidate: lines in
+  the answer SDP, and again as an explicit candidate list. To force a single
+  route, this page patches RTCPeerConnection so that, for the duration of one
+  test, every *remote* (server) candidate that is not the selected port+protocol
+  is stripped from the SDP and rejected from addIceCandidate. ICE is then left
+  with exactly one server endpoint to try: it either connects on that port over
+  that protocol, or the attempt fails — which is the answer you are testing for.
+
+  The browser's own local candidates are never filtered, and no service worker
+  or app iframe is involved: YuriRTCClient.connect() with no registration
+  exercises the real signaling + ICE + SCTP path and nothing else.
+
+  Run it (secure context required — localhost counts):
+      node tools/port-tester/serve.mjs
+  then open http://localhost:8787/port-test.html
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>YuriRTC port tester</title>
+  <style>
+    :root{
+      color-scheme:dark;
+      --primary:#ffafd0;--on-primary:#5e113b;--primary-container:#7a294f;--on-primary-container:#ffd8e8;
+      --surface:#151216;--surface-low:#1d191d;--surface-high:#2b252a;--surface-highest:#363036;
+      --on-surface:#eee0e4;--on-surface-variant:#d7c2c8;--outline:#9f8c92;--outline-variant:#514348;
+      --ok:#76dc91;--warn:#ebc248;--bad:#ff9b91;--deep-bad:#e05d58;--idle:#8b7d83;
+    }
+    *,*::before,*::after{box-sizing:border-box}
+    html,body{margin:0;min-height:100%;background:var(--surface);color:var(--on-surface);
+      font:15px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+      -webkit-font-smoothing:antialiased}
+    a{color:var(--primary)}
+    main{max-width:960px;margin:0 auto;padding:28px 20px 80px}
+    header h1{margin:0 0 4px;font-size:22px;letter-spacing:-.02em}
+    header p{margin:0;color:var(--on-surface-variant);font-size:13px}
+    .warn-banner{margin:16px 0 22px;padding:10px 14px;border:1px solid var(--outline-variant);
+      border-radius:12px;background:var(--surface-low);color:var(--on-surface-variant);font-size:12.5px}
+    .warn-banner b{color:var(--primary)}
+    section{margin:22px 0;padding:18px;border:1px solid var(--outline-variant);
+      border-radius:16px;background:var(--surface-low)}
+    section h2{margin:0 0 4px;font-size:15px;font-weight:750}
+    section .sub{margin:0 0 14px;color:var(--on-surface-variant);font-size:12.5px}
+    .proto-row{display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+    .seg{display:inline-flex;border:1px solid var(--outline-variant);border-radius:999px;overflow:hidden}
+    .seg button{border:0;background:transparent;color:var(--on-surface-variant);
+      padding:7px 18px;font:inherit;font-weight:700;cursor:pointer}
+    .seg button[aria-pressed="true"]{background:var(--primary);color:var(--on-primary)}
+    .custom{display:flex;gap:8px;align-items:center;margin-left:auto}
+    .custom input{width:96px;padding:7px 10px;border:1px solid var(--outline-variant);border-radius:10px;
+      background:var(--surface-high);color:var(--on-surface);font:inherit}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+    .cell{position:relative;padding:11px 12px;border:1px solid var(--outline-variant);border-radius:12px;
+      background:var(--surface-high);cursor:pointer;text-align:left;color:inherit;font:inherit;transition:filter .12s}
+    .cell:hover{filter:brightness(1.08)}
+    .cell:disabled{cursor:progress;opacity:.6}
+    .cell .port{font-size:17px;font-weight:800;letter-spacing:-.01em}
+    .cell .note{display:block;margin-top:2px;color:var(--on-surface-variant);font-size:11px;line-height:1.35;
+      min-height:28px}
+    .cell .dot{position:absolute;top:11px;right:11px;width:10px;height:10px;border-radius:50%;
+      background:var(--idle);box-shadow:0 0 0 3px color-mix(in srgb,var(--idle) 26%,transparent)}
+    .cell[data-status="connected"] .dot{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 26%,transparent)}
+    .cell[data-status="failed"] .dot{background:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 26%,transparent)}
+    .cell[data-status="testing"] .dot{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 26%,transparent);
+      animation:pulse 1s ease-in-out infinite}
+    @keyframes pulse{50%{opacity:.35}}
+    .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+    button.action{border:0;border-radius:999px;padding:9px 18px;font:inherit;font-weight:750;cursor:pointer;
+      background:var(--primary);color:var(--on-primary)}
+    button.action.ghost{background:transparent;color:var(--primary);border:1px solid var(--outline-variant)}
+    button.action:disabled{opacity:.5;cursor:not-allowed}
+    .live{display:flex;align-items:center;gap:10px;margin-top:12px;color:var(--on-surface-variant);font-size:13px}
+    .spinner{width:15px;height:15px;border:2px solid var(--surface-highest);border-top-color:var(--primary);
+      border-radius:50%;animation:spin .7s linear infinite;display:none}
+    .spinner.on{display:inline-block}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    table{width:100%;border-collapse:collapse;font-size:12.5px}
+    th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--outline-variant);white-space:nowrap}
+    th{color:var(--on-surface-variant);font-weight:700}
+    td.result{font-weight:750}
+    td.result[data-r="connected"]{color:var(--ok)}
+    td.result[data-r="failed"]{color:var(--bad)}
+    td.detail{white-space:normal;color:var(--on-surface-variant);font-size:11.5px}
+    .log{margin:0;padding:12px;max-height:220px;overflow:auto;border-radius:12px;background:#000;
+      color:#cfe8d4;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word}
+    .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+    .chip{padding:5px 11px;border:1px solid var(--outline-variant);border-radius:999px;background:var(--surface-high);
+      color:var(--on-surface);font-size:12px;cursor:pointer}
+    .chip:hover{filter:brightness(1.1)}
+    .muted{color:var(--outline)}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>YuriRTC manual port tester</h1>
+    <p>Pin the ICE connection to one server port + protocol and see whether it reaches the content node from this network.</p>
+  </header>
+
+  <div class="warn-banner">
+    <b>Local diagnostic only — not published.</b>
+    This page talks to the live signaling project and content node using the public web config baked in below.
+    It never registers a service worker and never loads the app; it only opens (and immediately closes) the WebRTC transport.
+  </div>
+
+  <section id="controls">
+    <h2>Attempting connection port</h2>
+    <p class="sub">Pick a protocol, then click a port to force the connection onto exactly that route. Each test is independent.</p>
+    <div class="proto-row">
+      <div class="seg" id="proto" role="group" aria-label="Protocol">
+        <button type="button" data-proto="udp" aria-pressed="true">UDP</button>
+        <button type="button" data-proto="tcp" aria-pressed="false">TCP</button>
+      </div>
+      <div class="custom">
+        <input id="customPort" type="number" min="1" max="65535" placeholder="port" inputmode="numeric">
+        <button type="button" class="action ghost" id="testCustom">Test port</button>
+      </div>
+    </div>
+    <div class="grid" id="grid"></div>
+    <div class="actions">
+      <button type="button" class="action" id="runAll">Run all (current protocol)</button>
+      <button type="button" class="action ghost" id="discover">Discover offered routes</button>
+      <button type="button" class="action ghost" id="stop" disabled>Stop</button>
+      <button type="button" class="action ghost" id="clear">Clear results</button>
+    </div>
+    <div class="live"><span class="spinner" id="spin"></span><span id="liveText">Idle.</span></div>
+  </section>
+
+  <section>
+    <h2>Discovered server routes</h2>
+    <p class="sub">Every server ICE candidate seen during the last attempt. Click one to pin and re-test it.</p>
+    <div class="chips" id="discovered"><span class="muted">Run “Discover offered routes” to populate this.</span></div>
+  </section>
+
+  <section>
+    <h2>Results</h2>
+    <p class="sub">Newest first. “Route used” is read back from the selected ICE candidate pair, so it confirms the connection really used the pinned port.</p>
+    <div style="overflow-x:auto">
+      <table id="results">
+        <thead><tr><th>When</th><th>Requested</th><th>Result</th><th>Route used</th><th>ms</th><th>Backend</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <pre class="log" id="log"></pre>
+  </section>
+</main>
+
+<script type="module">
+/* ------------------------------------------------------------------ config */
+// Public Firebase *web* config — the same values that ship inside the carrier
+// (see .env.release). Public by design; the security rules enforce access.
+const config = {
+  firebase: {
+    apiKey: "AIzaSyARnsPo429lQaMLENVHt32vq2XM0-C-DDo",
+    projectId: "fbc55d",
+    databaseUrl: "https://fbc55d-default-rtdb.firebaseio.com"
+  },
+  cache: { lruBudgetBytes: 330 * 1024 * 1024, maxQuotaShare: 0.5 },
+  signal: { hedgeDelayMs: 1500 }
+};
+
+const LOADER_VERSION = "0.5.1";
+const LOADER_PACKAGE = "@advwebrec/grainloading";
+const clientSources = [
+  `https://cdn.jsdelivr.net/npm/${LOADER_PACKAGE}@${LOADER_VERSION}/dist/bundle/client.js`,
+  `https://unpkg.com/${LOADER_PACKAGE}@${LOADER_VERSION}/dist/bundle/client.js`
+];
+
+// The content node's default port set, annotated. Order matches main.go.
+const KNOWN_PORTS = [
+  [443,   "HTTPS — open essentially everywhere"],
+  [80,    "HTTP — open essentially everywhere"],
+  [5228,  "Google Play / Chrome push"],
+  [5229,  "Google Play / Chrome push"],
+  [5230,  "Google Play / Chrome push"],
+  [5223,  "Apple push (iPads)"],
+  [2197,  "Apple alternate push"],
+  [53,    "DNS — often redirected, looks open"],
+  [123,   "NTP — often redirected, looks open"],
+  [49152, "Bottom of ephemeral range — first to be dropped"],
+  [445,   "SMB — blocked almost everywhere; conspicuous where not"]
+];
+
+const TEST_TIMEOUT_MS = 22_000; // > the client's 15s channel-open timeout
+const STORE_KEY = "yurirtc-port-tester-results-v1";
+
+/* --------------------------------------------------- RTCPeerConnection hook */
+// One selection is active at a time. null => discover mode (no filtering).
+let currentSelection = null;      // { port:number, protocol:"udp"|"tcp" }
+let lastPc = null;                // most recent RTCPeerConnection, for getStats
+let seenServerCandidates = new Map(); // "proto port" -> {protocol,port,address}
+
+function parseCandidate(str) {
+  if (!str) return null;
+  let s = String(str).trim();
+  if (s.startsWith("a=")) s = s.slice(2);
+  if (!s.startsWith("candidate:")) return null;
+  const p = s.split(/\s+/);
+  if (p.length < 6) return null;
+  const port = Number(p[5]);
+  if (!Number.isFinite(port)) return null;
+  return { protocol: (p[2] || "").toLowerCase(), address: p[4], port };
+}
+
+function recordServerCandidate(c) {
+  if (!c) return;
+  seenServerCandidates.set(`${c.protocol} ${c.port}`, c);
+}
+
+function matchesSelection(c) {
+  if (!currentSelection) return true; // discover mode keeps everything
+  return c && c.protocol === currentSelection.protocol && c.port === currentSelection.port;
+}
+
+function filterAnswerSdp(sdp) {
+  // Keep every line except non-matching a=candidate: lines. Server candidate
+  // lines that survive are only the pinned port+protocol.
+  const eol = sdp.includes("\r\n") ? "\r\n" : "\n";
+  const kept = [];
+  for (const line of sdp.split(/\r\n|\n/)) {
+    if (line.startsWith("a=candidate:")) {
+      const c = parseCandidate(line);
+      recordServerCandidate(c);
+      if (!matchesSelection(c)) continue;
+    }
+    kept.push(line);
+  }
+  return kept.join(eol);
+}
+
+(function installHook() {
+  const proto = window.RTCPeerConnection && window.RTCPeerConnection.prototype;
+  if (!proto) return;
+
+  const nativeSetRemote = proto.setRemoteDescription;
+  proto.setRemoteDescription = function (desc, ...rest) {
+    lastPc = this;
+    try {
+      if (desc && typeof desc.sdp === "string" && (desc.type === "answer" || !desc.type)) {
+        const sdp = filterAnswerSdp(desc.sdp);
+        // RTCSessionDescriptionInit is a plain object; clone with new sdp.
+        const patched = (desc.toJSON ? desc.toJSON() : { ...desc });
+        patched.sdp = sdp;
+        return nativeSetRemote.call(this, patched, ...rest);
+      }
+    } catch (e) {
+      log(`! setRemoteDescription filter error: ${e.message}`);
+    }
+    return nativeSetRemote.call(this, desc, ...rest);
+  };
+
+  const nativeAddIce = proto.addIceCandidate;
+  proto.addIceCandidate = function (candidate, ...rest) {
+    const init = candidate && (candidate.toJSON ? candidate.toJSON() : candidate);
+    const str = init && init.candidate;
+    if (str) {
+      const c = parseCandidate(str);
+      recordServerCandidate(c);
+      if (!matchesSelection(c)) {
+        // Silently drop the non-selected server candidate.
+        return Promise.resolve();
+      }
+    }
+    return nativeAddIce.call(this, candidate, ...rest);
+  };
+})();
+
+/* ------------------------------------------------------------ load client */
+let YuriRTCClient = null;
+async function loadClient() {
+  if (YuriRTCClient) return YuriRTCClient;
+  let lastErr;
+  for (const url of clientSources) {
+    try {
+      const mod = await import(url);
+      if (!mod.YuriRTCClient) throw new Error("bundle has no YuriRTCClient export");
+      YuriRTCClient = mod.YuriRTCClient;
+      log(`loaded client bundle from ${url}`);
+      return YuriRTCClient;
+    } catch (e) { lastErr = e; }
+  }
+  throw new Error(`could not load loader bundle: ${lastErr && lastErr.message}`);
+}
+
+/* ------------------------------------------------ selected-pair read-back */
+async function readSelectedRoute(pc) {
+  if (!pc) return null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const stats = await pc.getStats();
+      for (const report of stats.values()) {
+        if (report.type !== "candidate-pair") continue;
+        if (report.state !== "succeeded") continue;
+        if (!report.nominated && !report.selected) continue;
+        const remote = stats.get(report.remoteCandidateId || "");
+        const local = stats.get(report.localCandidateId || "");
+        const protocol = (remote?.protocol || local?.protocol || "?").toLowerCase();
+        const port = remote?.port ?? "?";
+        return { protocol, port, local: local?.candidateType, remote: remote?.candidateType };
+      }
+    } catch { break; }
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------- one test */
+let running = false;
+let cancelAll = false;
+
+function withTimeout(promise, ms, onTimeout) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => { onTimeout?.(); reject(new Error(`timed out after ${ms} ms`)); }, ms);
+    promise.then((v) => { clearTimeout(t); resolve(v); },
+                 (e) => { clearTimeout(t); reject(e); });
+  });
+}
+
+async function runTest(selection) {
+  // selection: { port, protocol } to pin, or null to discover.
+  await loadClient();
+  currentSelection = selection;
+  seenServerCandidates = new Map();
+  lastPc = null;
+
+  const label = selection ? `${selection.protocol.toUpperCase()} ${selection.port}` : "discover (no pin)";
+  setCellStatus(selection, "testing");
+  liveOn(`Testing ${label}…`);
+  log(`── ${label} ──────────────────────────────`);
+
+  const client = new YuriRTCClient(config);
+  const started = performance.now();
+  let outcome;
+  try {
+    const diag = await withTimeout(client.connect(), TEST_TIMEOUT_MS, () => client.close());
+    const route = await readSelectedRoute(lastPc);
+    const ms = Math.round(performance.now() - started);
+    const routeText = route ? `${route.protocol.toUpperCase()} :${route.port} (${route.remote || "?"})`
+                            : `${diag.route.transport}/${diag.route.portClass}`;
+    outcome = { status: "connected", route: routeText, ms, backend: diag.signalBackend };
+    log(`✓ connected via ${routeText} in ${ms} ms (signal: ${diag.signalBackend})`);
+  } catch (e) {
+    const ms = Math.round(performance.now() - started);
+    outcome = { status: "failed", route: e.message, ms, backend: "—" };
+    log(`✗ ${label} failed: ${e.message}`);
+  } finally {
+    try { client.close(); } catch {}
+    currentSelection = null;
+  }
+
+  renderDiscovered();
+  setCellStatus(selection, outcome.status);
+  recordResult(label, selection, outcome);
+  liveOff();
+  return outcome;
+}
+
+/* ------------------------------------------------------------- results store */
+function loadResults() {
+  try { return JSON.parse(localStorage.getItem(STORE_KEY) || "[]"); } catch { return []; }
+}
+function saveResults(rows) {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(rows.slice(0, 300))); } catch {}
+}
+let results = loadResults();
+
+function recordResult(label, selection, outcome) {
+  results.unshift({
+    at: new Date().toISOString(),
+    requested: label,
+    key: selection ? `${selection.protocol}:${selection.port}` : "discover",
+    ...outcome
+  });
+  saveResults(results);
+  renderResults();
+  applyStoredStatuses();
+}
+
+/* --------------------------------------------------------------- rendering */
+const grid = document.getElementById("grid");
+const protoGroup = document.getElementById("proto");
+const spin = document.getElementById("spin");
+const liveText = document.getElementById("liveText");
+const logEl = document.getElementById("log");
+const resultsBody = document.querySelector("#results tbody");
+const discoveredEl = document.getElementById("discovered");
+
+let protocol = "udp";
+
+function log(line) {
+  const at = new Date().toISOString().slice(11, 23);
+  logEl.textContent += `[${at}] ${line}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function liveOn(text) { spin.classList.add("on"); liveText.textContent = text; }
+function liveOff() { spin.classList.remove("on"); liveText.textContent = "Idle."; }
+
+function cellId(port, proto) { return `cell-${proto}-${port}`; }
+
+function buildGrid() {
+  grid.innerHTML = "";
+  for (const [port, note] of KNOWN_PORTS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "cell";
+    b.id = cellId(port, protocol);
+    b.dataset.port = String(port);
+    b.dataset.proto = protocol;
+    b.innerHTML = `<span class="dot"></span><span class="port">${port}</span><span class="note">${note}</span>`;
+    b.addEventListener("click", () => queueTests([{ port, protocol }]));
+    grid.appendChild(b);
+  }
+  applyStoredStatuses();
+}
+
+function setCellStatus(selection, status) {
+  if (!selection) return;
+  const cell = document.getElementById(cellId(selection.port, selection.protocol));
+  if (cell && cell.dataset.proto === protocol) cell.dataset.status = status;
+}
+
+function applyStoredStatuses() {
+  // Reflect the latest stored outcome per port for the visible protocol.
+  const latest = new Map();
+  for (const r of results) {
+    if (!latest.has(r.key)) latest.set(r.key, r.status);
+  }
+  for (const [port] of KNOWN_PORTS) {
+    const cell = document.getElementById(cellId(port, protocol));
+    if (!cell) continue;
+    const s = latest.get(`${protocol}:${port}`);
+    if (s) cell.dataset.status = s; else delete cell.dataset.status;
+  }
+}
+
+function renderResults() {
+  resultsBody.innerHTML = "";
+  for (const r of results.slice(0, 120)) {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${r.at.slice(11, 19)}</td>` +
+      `<td>${r.requested}</td>` +
+      `<td class="result" data-r="${r.status}">${r.status}</td>` +
+      `<td class="detail">${escapeHtml(r.route)}</td>` +
+      `<td>${r.ms}</td>` +
+      `<td>${r.backend}</td>`;
+    resultsBody.appendChild(tr);
+  }
+}
+
+function renderDiscovered() {
+  const items = [...seenServerCandidates.values()]
+    .sort((a, b) => a.protocol.localeCompare(b.protocol) || a.port - b.port);
+  if (!items.length) {
+    discoveredEl.innerHTML = `<span class="muted">No server candidates seen in the last attempt.</span>`;
+    return;
+  }
+  discoveredEl.innerHTML = "";
+  for (const c of items) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip";
+    chip.textContent = `${c.protocol.toUpperCase()} :${c.port}`;
+    chip.title = `${c.address}:${c.port} (${c.protocol})`;
+    chip.addEventListener("click", () => {
+      protocol = c.protocol;
+      syncProtoButtons();
+      buildGrid();
+      queueTests([{ port: c.port, protocol: c.protocol }]);
+    });
+    discoveredEl.appendChild(chip);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+/* ------------------------------------------------------------- test queue */
+async function queueTests(list) {
+  if (running) { log("busy — a test is already running"); return; }
+  running = true; cancelAll = false;
+  setButtonsDisabled(true);
+  document.getElementById("stop").disabled = false;
+  try {
+    for (const sel of list) {
+      if (cancelAll) { log("stopped."); break; }
+      await runTest(sel);
+      await new Promise((r) => setTimeout(r, 250)); // let sockets close between tests
+    }
+  } finally {
+    running = false;
+    setButtonsDisabled(false);
+    document.getElementById("stop").disabled = true;
+    liveOff();
+  }
+}
+
+function setButtonsDisabled(v) {
+  for (const b of grid.querySelectorAll(".cell")) b.disabled = v;
+  for (const id of ["runAll", "discover", "testCustom", "clear"]) document.getElementById(id).disabled = v;
+}
+
+/* -------------------------------------------------------------- protocol */
+function syncProtoButtons() {
+  for (const b of protoGroup.querySelectorAll("button")) {
+    b.setAttribute("aria-pressed", String(b.dataset.proto === protocol));
+  }
+}
+protoGroup.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-proto]");
+  if (!b) return;
+  protocol = b.dataset.proto;
+  syncProtoButtons();
+  buildGrid();
+});
+
+/* --------------------------------------------------------------- buttons */
+document.getElementById("runAll").addEventListener("click", () => {
+  queueTests(KNOWN_PORTS.map(([port]) => ({ port, protocol })));
+});
+document.getElementById("discover").addEventListener("click", () => {
+  queueTests([null]); // null selection = discover mode
+});
+document.getElementById("testCustom").addEventListener("click", () => {
+  const v = Number(document.getElementById("customPort").value);
+  if (!Number.isInteger(v) || v < 1 || v > 65535) { log("! enter a port 1–65535"); return; }
+  queueTests([{ port: v, protocol }]);
+});
+document.getElementById("stop").addEventListener("click", () => { cancelAll = true; });
+document.getElementById("clear").addEventListener("click", () => {
+  results = []; saveResults(results); renderResults(); buildGrid();
+  discoveredEl.innerHTML = `<span class="muted">Cleared.</span>`;
+  log("results cleared");
+});
+
+/* ----------------------------------------------------------------- init */
+if (!window.isSecureContext) {
+  log("! not a secure context — serve over http://localhost or https, or WebRTC/Firebase will fail");
+}
+syncProtoButtons();
+buildGrid();
+renderResults();
+log("ready. Pick a protocol and click a port, or Discover to list offered routes.");
+</script>
+</body>
+</html>

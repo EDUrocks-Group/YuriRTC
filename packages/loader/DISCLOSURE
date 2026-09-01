@@ -1,0 +1,19 @@
+YuriRTC dual-use disclosure
+
+This package contains the YuriRTC browser client and service worker. It transports
+requests and responses for a site operator's hosted web content over WebRTC data
+channels to a content node configured by that operator. The service worker
+reconstructs same-origin responses within its registered deployment scope, and
+the distributed browser bundles are minified and obfuscated.
+
+These capabilities are security-relevant and may resemble software used to move
+traffic through restrictive networks. They are intended only for legitimate,
+authorized hosting and access to content. They must not be used to bypass access
+controls, monitoring, organizational policy, or network restrictions without the
+authorization of the affected users and system or network owners.
+
+Readable source, build instructions, tests, and deployment documentation are
+available at https://github.com/EDUrocks-Group/YuriRTC.
+
+Security and abuse reports may be filed privately with allhands@edurocks.org or
+through https://github.com/EDUrocks-Group/YuriRTC/issues.

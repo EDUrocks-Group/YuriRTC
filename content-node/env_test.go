@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/pion/sctp"
+)
 
 func TestYuriRTCEnvUsesFallbackWhenUnset(t *testing.T) {
 	const suffix = "TEST_UNSET"
@@ -38,5 +42,34 @@ func TestCapacityEnvUsesLegacyName(t *testing.T) {
 
 	if got := capacityEnv("USERS", "100"); got != "20000" {
 		t.Fatalf("capacityEnv() = %q, want legacy value", got)
+	}
+}
+
+func TestResolveSCTPCongestionControl(t *testing.T) {
+	tests := []struct {
+		input    string
+		selector uint32
+		name     string
+		wantErr  bool
+	}{
+		{input: "", selector: sctp.CwndCAStepUseCUBIC, name: "cubic"},
+		{input: " CUBIC ", selector: sctp.CwndCAStepUseCUBIC, name: "cubic"},
+		{input: "reno", selector: 0, name: "reno"},
+		{input: "bbr", wantErr: true},
+	}
+	for _, test := range tests {
+		selector, name, err := resolveSCTPCongestionControl(test.input)
+		if test.wantErr {
+			if err == nil {
+				t.Errorf("resolveSCTPCongestionControl(%q) succeeded", test.input)
+			}
+			continue
+		}
+		if err != nil || selector != test.selector || name != test.name {
+			t.Errorf(
+				"resolveSCTPCongestionControl(%q) = (%d, %q, %v), want (%d, %q, nil)",
+				test.input, selector, name, err, test.selector, test.name,
+			)
+		}
 	}
 }

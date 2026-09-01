@@ -46,6 +46,71 @@ export const CARRIER_READY_TIMEOUT_MS =
 /** One stalled winner may expire while a standby still gets a full READY turn. */
 export const CARRIER_ACQUIRE_TIMEOUT_MS = CARRIER_READY_TIMEOUT_MS * 3;
 
+/**
+ * Private hop-by-hop representation negotiation for the YuriRTC data channel.
+ *
+ * These deliberately are not Accept-Encoding/Content-Encoding. A synthesized
+ * Fetch Response is not passed through the browser's HTTP content decoder, so
+ * advertising ordinary HTTP gzip here would hand compressed bytes to the site.
+ * Old nodes ignore the request header and old loaders never send it, making the
+ * optimization independently deployable on either side of protocol v3.
+ */
+export const WIRE_ACCEPT_ENCODING_HEADER = "x-yurirtc-accept-wire-encoding";
+export const WIRE_CONTENT_ENCODING_HEADER = "x-yurirtc-wire-encoding";
+
+export function supportsWireGzip(): boolean {
+  return typeof globalThis.DecompressionStream === "function";
+}
+
+export function decodeWireBody(
+  body: ReadableStream<Uint8Array>,
+  encoding: string | undefined
+): ReadableStream<Uint8Array> {
+  if (!encoding) return body;
+  if (encoding.toLowerCase().trim() !== "gzip") {
+    throw new Error(`unsupported YuriRTC wire encoding: ${encoding}`);
+  }
+  if (!supportsWireGzip()) {
+    throw new Error("YuriRTC node sent gzip to a browser without DecompressionStream");
+  }
+  // DOM and WebWorker lib declarations disagree on whether the writable side
+  // accepts BufferSource or Uint8Array, although Uint8Array is a BufferSource
+  // in every target browser. Keep the cast at this boundary only.
+  const decoder = new DecompressionStream("gzip") as unknown as TransformStream<
+    Uint8Array,
+    Uint8Array
+  >;
+  return body.pipeThrough(decoder);
+}
+
+interface TransportRequestBody {
+  readonly method: string;
+  /** Firefox currently leaves this undefined on FetchEvent requests. */
+  readonly body?: ReadableStream<Uint8Array> | null;
+  blob(): Promise<Blob>;
+}
+
+/**
+ * Expose a Fetch request body to the page transport.
+ *
+ * Chromium exposes FetchEvent.request.body and therefore keeps uploads truly
+ * streaming. Firefox, and some Safari service-worker releases, expose the Body
+ * mixin methods but leave Request.body nullish. Materialising a Blob is the
+ * interoperable fallback in those engines. Blob.stream() avoids another full
+ * Uint8Array copy and the page still fragments it into credit-controlled
+ * YuriRTC frames.
+ */
+export async function requestBodyForTransport(
+  request: TransportRequestBody
+): Promise<ReadableStream<Uint8Array> | undefined> {
+  const method = request.method.toUpperCase();
+  if (method === "GET" || method === "HEAD") return undefined;
+  if (request.body) return request.body;
+
+  const blob = await request.blob();
+  return blob.size === 0 ? undefined : blob.stream();
+}
+
 export type SwToPage =
   | {
       t: "req";
@@ -109,7 +174,8 @@ const STRIPPED = new Set([
   "transfer-encoding",
   "connection",
   "keep-alive",
-  "set-cookie"
+  "set-cookie",
+  WIRE_CONTENT_ENCODING_HEADER
 ]);
 
 export function responseHeaders(headers: HeaderPairs): Headers {

@@ -21,7 +21,11 @@ flowchart LR
     N --> API[Optional API backend]
 ```
 
-The browser shell remains loaded for the session so navigation inside the application does not destroy its `RTCPeerConnection`. The service worker is the transport boundary: it controls the application iframe, maps requests into the deployment's logical root, forwards them through the shell, and reconstructs browser `Response` objects. Protocol v3 keeps one interactive data channel open and lazily adds three bulk channels during asset waterfalls; all four share one ICE/DTLS/SCTP connection. Response bodies use adaptive consumption-driven credits, while request bodies stream from Fetch through the service worker and cross the RTC link only as the content node grants bounded upload credits.
+The browser shell remains loaded for the session so navigation inside the application does not destroy its `RTCPeerConnection`. The service worker is the transport boundary: it controls the application iframe, maps requests into the deployment's logical root, forwards them through the shell, and reconstructs browser `Response` objects. Protocol v3 keeps one interactive data channel and three asset channels; all four share one ICE/DTLS/SCTP connection. The asset lanes open before the application waterfall and retire after an idle period. Response bodies use adaptive consumption-driven credits, while request bodies stream from Fetch through the service worker and cross the RTC link only as the content node grants bounded upload credits.
+
+The content node uses CUBIC congestion avoidance by default, requests Immediate-SACK during low-window recovery, and reduces the SCTP send path to one owned message copy plus bounded reusable packet buffers. Reno remains an explicit rollback setting. A new browser session without a remembered route races ordinary ICE and forced TCP using a bounded node-internal probe. If a selected UDP route later becomes slow, the browser warms TCP in the background, moves new requests to it, lets existing requests and WebSockets drain on UDP, and then retires the predecessor. No application request is replayed during that handoff.
+
+Static transfer optimizations remain protocol-v3 compatible. A capable loader privately negotiates gzip for eligible complete static responses; other responses remain byte-identical. Generic static files receive validators and conservative revalidation metadata, so arbitrary YuriRTC-hosted sites—not only EDUrocks path conventions—can reuse unchanged browser-cached bytes without caching APIs, partial responses, streams, or private responses.
 
 Signaling has two independent Firebase legs:
 
@@ -32,7 +36,7 @@ The browser races or hedges these legs. Firebase carries only signaling data; ap
 
 YuriRTC currently advertises direct UDP and TCP ICE candidates. It does not ship a TURN relay.
 
-The carrier displays only a coarse classification of the route Chrome selected: UDP or TCP, and port 443 or a configured non-443 port. It never puts the remote address, raw ICE candidate, or exact high/low fallback port in its DOM, public diagnostics, or application console. The peer address remains inherently available in browser-internal WebRTC diagnostics because this is a direct connection.
+The carrier displays only a coarse classification of the route the browser selected: UDP or TCP, and port 443 or a configured non-443 port. It never puts the remote address, raw ICE candidate, or exact high/low fallback port in its DOM, public diagnostics, or application console. The peer address remains inherently available in browser-internal WebRTC diagnostics because this is a direct connection.
 
 ## Repository layout
 
@@ -41,7 +45,9 @@ The carrier displays only a coarse classification of the route Chrome selected: 
 | `packages/protocol` | Binary request/response framing and limits |
 | `packages/signaling` | Firestore and RTDB signaling clients |
 | `packages/loader` | Browser client, service worker, caching, scoping, and injection |
+| `packages/integrity` | Signed immutable loader pointer published as `shaintloadingcheckpak` |
 | `content-node` | Go WebRTC endpoint and content/API handler |
+| `third_party/pion-sctp` | Reproducible Pion v1.11.1 transport fork with CUBIC and packet-path changes |
 | `deploy/firebase` | Generic Firebase rules, indexes, and rule verification |
 | `deploy/npm` | Source and generated `index.html`/`sw.js` static package |
 | `docs` | Compatibility and deployment guidance |
@@ -57,15 +63,11 @@ The carrier displays only a coarse classification of the route Chrome selected: 
 
 ## Build and test
 
-Install exact JavaScript dependencies and run the complete repository checks:
+Install exact JavaScript dependencies and run the complete self-hosted CI gate:
 
 ```bash
 npm ci
-npm run typecheck
-npm test
-npm run build
-
-(cd content-node && go test ./...)
+npm run ci:local
 ```
 
 The release-grade local E2E launches Chrome and exercises the real carrier,
@@ -76,6 +78,30 @@ during an upload to verify first-carrier/standby election:
 
 ```bash
 npm run test:e2e
+```
+
+The self-hosted gate runs both the signed-CDN and bundled-loader carriers in
+Chromium, Firefox, and WebKit over both UDP and TCP. For an explicit local
+cross-browser run:
+
+```bash
+node node_modules/playwright-core/cli.js install chromium firefox webkit
+YURIRTC_BROWSER_E2E_ENGINES=chromium,firefox,webkit \
+YURIRTC_BROWSER_E2E_PROTOCOLS=udp,tcp \
+npm run test:e2e
+```
+
+`npm run ci:local` only builds, verifies, tests, and writes artifacts under
+`build/ci`; it does not publish npm packages, upload carriers, or modify an
+existing deployment.
+
+Linux self-hosted runners can also exercise the real Go/WebRTC/SCTP path under
+repeatable delay, random loss, burst loss, and reordering. The quick matrix is
+the pull-request gate; the full matrix is intended for transport releases:
+
+```bash
+./content-node/wan-regression.sh --quick
+./content-node/wan-regression.sh --full
 ```
 
 The ordinary build may use non-deployable placeholder configuration so contributors can compile and test without access to a Firebase project. A public release requires explicit client configuration:
@@ -89,13 +115,20 @@ npm run build:release
 npm run verify:release
 ```
 
-That command generates `deploy/npm/index.html` and `deploy/npm/sw.js`. They are build products; edit the readable files under `deploy/npm/src` instead.
+That command generates the normal pair at `deploy/npm/index.html` and
+`deploy/npm/sw.js`, plus the CDN-independent variant under
+`deploy/npm/bundled/`. The alternate HTML carries the exact current loader and
+font inline; its same-version full `sw.js` and durable `client.js` remain
+same-origin. Upload every file in that directory together. These are build
+products; edit the readable files under `deploy/npm/src` instead. The
+self-hosted CI script writes only under `build/ci` and never overwrites existing
+deployment copies.
 
 The release verifier checks the npm file list and generated artifacts. In particular, the loader package must not contain source maps, readable compiled JavaScript, or compiled tests. Public loader exports and CDN paths remain stable.
 
 ## Static hosting
 
-Only two same-directory files are required:
+The normal signed-CDN carrier requires two same-directory files:
 
 ```text
 index.html
@@ -110,7 +143,7 @@ https://s3.example-region.amazonaws.com/example-bucket/index.html
 https://static.example.invalid/releases/stable/index.html
 ```
 
-Serve `index.html` as `text/html` and `sw.js` as JavaScript. Both should use `Cache-Control: no-cache` so browsers revalidate releases. The generated shell references the loader's `latest` npm dist-tag, so publishing a new loader version reaches deployed carriers without re-uploading the bucket pair. For a future wire change, deploy and canary an explicitly backward-compatible transition node before moving `latest`, then retire the older wire version only after the new browser release is verified.
+Serve `index.html` as `text/html` and `sw.js` as JavaScript. Both should use `Cache-Control: no-cache` so browsers revalidate releases. The shell fetches `shaintloadingcheckpak@latest/loader.json`, verifies its committed ECDSA P-256 signature, downloads the immutable `@advwebrec/grainloading@VERSION` client from jsDelivr or unpkg, verifies its SHA-256, and only then imports it. The signed client version is also passed to the same-origin worker stub so its worker import is immutable.
 
 See [Deployment](docs/DEPLOYMENT.md) for Firebase setup, content-node configuration, publishing, object-store commands, and rollback. See [Compatibility](docs/COMPATIBILITY.md) before changing package names, environment variables, cache identifiers, signaling paths, or service-worker scope behavior.
 

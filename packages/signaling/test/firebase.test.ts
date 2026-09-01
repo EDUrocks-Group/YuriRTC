@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { FirestoreBackend, nextPollInterval } from "../src/firestore.js";
+import {
+  FirestoreBackend,
+  firestoreServiceRoot,
+  nextPollInterval
+} from "../src/firestore.js";
 import { RtdbBackend } from "../src/rtdb.js";
 import { SignalError } from "../src/types.js";
 import type { AnswerBlob, OfferBlob } from "../src/types.js";
@@ -65,6 +69,37 @@ test("Firestore poll backoff doubles and caps", () => {
   assert.equal(nextPollInterval(400, 1_600), 800);
   assert.equal(nextPollInterval(800, 1_600), 1_600);
   assert.equal(nextPollInterval(1_600, 1_600), 1_600);
+});
+
+test("Firestore accepts an explicit self-hosted REST root", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push(requestUrl(input));
+    if (init?.method === "PATCH") return Response.json({});
+    return Response.json({
+      fields: { answer: { stringValue: JSON.stringify(answer) } }
+    });
+  }) as typeof fetch;
+
+  try {
+    const backend = new FirestoreBackend({
+      projectId: "project",
+      baseUrl: "http://127.0.0.1:8080/firestore/",
+      firstPollMs: 0
+    });
+    assert.deepEqual(await backend.exchange(offer, new AbortController().signal), answer);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every((url) => url.startsWith(
+    "http://127.0.0.1:8080/firestore/v1/projects/project/"
+  )));
+  assert.equal(firestoreServiceRoot("https://signal.example.test/root/?ignored=1#ignored"),
+    "https://signal.example.test/root");
+  assert.throws(() => firestoreServiceRoot("data:text/plain,no"), /HTTP or HTTPS/);
 });
 
 class FakeEventSource {

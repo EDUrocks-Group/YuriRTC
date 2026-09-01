@@ -4,6 +4,14 @@ This package's npm name is a distribution coordinate retained for existing CDN
 and deployment links. The package contains the two path-portable files a
 static host needs: `index.html` and `sw.js`.
 
+The release pipeline also produces `bundled/`, a CDN-independent loader
+variant for networks that cannot reach jsDelivr or unpkg. Its `index.html`
+contains the exact current loader client and display font inline; `sw.js` is
+the full same-version loader worker, and the colocated `client.js` is the
+durable recovery module used by transported documents. Upload all six files in
+that directory together. `LICENSE`, `FONT-LICENSE.txt`, and `SOURCE.txt` carry
+the notices required by the bundled AGPL loader and font.
+
 Build a non-deployable placeholder artifact with `npm run build`. A release
 build requires these environment variables:
 
@@ -12,10 +20,12 @@ build requires these environment variables:
 - `YURIRTC_FIREBASE_DATABASE_URL`
 
 The former `FIREBASE_*` spellings remain accepted as compatibility aliases.
-The resulting JavaScript is obfuscated, visible DOM copy is ROT13-encoded, and
-the sole display font follows the YuriRTC loader package's `latest` tag. The
-release gate verifies that both CDNs serve the exact font bytes before the
-carrier package is published.
+The resulting JavaScript is heavily minified and obfuscated, visible DOM copy
+remains ROT13-encoded, and UI icons use Google's hosted Material Symbols
+stylesheet without glow effects. The carrier verifies the ECDSA-signed
+`shaintloadingcheckpak` pointer and SHA-256 of the immutable `@advwebrec/grainloading`
+client before execution. Signature or hash failures require a three-second
+explicit continuation; complete CDN failure shows the support message.
 
 ## Carrier network-state API
 
@@ -53,3 +63,11 @@ Release builds stamp both generated files with opaque source fingerprints.
 built before the current loader/package versions. Rebuild with the production
 Firebase web configuration before verification and upload `index.html` and
 `sw.js` together.
+
+`npm run build:release:bundled` creates the alternate carrier under `bundled/`,
+and `npm run verify:bundled` verifies its inline client, durable client, full
+worker, font, notices, loader version, and source fingerprints. “Current” means
+the loader version in this checkout at build time; the bundled carrier does not
+follow an npm dist-tag after upload, so rebuild and redeploy it for each loader
+release. The normal npm package remains the signed-CDN two-file carrier and is
+unchanged by this alternate artifact.

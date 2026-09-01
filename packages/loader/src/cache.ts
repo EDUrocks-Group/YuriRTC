@@ -91,10 +91,87 @@ export function cacheNameFor(policy: CachePolicy): string | null {
     case "stale-while-revalidate":
       return names.route;
     case "cache-first-lru":
+    case "revalidate-lru":
       return names.lru;
     default:
       return null;
   }
+}
+
+function cacheControlDirectives(headers: Headers): Set<string> {
+  const directives = new Set<string>();
+  for (const part of (headers.get("cache-control") ?? "").split(",")) {
+    const directive = part.trim().toLowerCase().split("=", 1)[0];
+    if (directive) directives.add(directive);
+  }
+  return directives;
+}
+
+/**
+ * CacheStorage does not implement the HTTP cache's admission rules for us.
+ * Keep this conservative so arbitrary YuriRTC-hosted sites cannot accidentally
+ * persist private, authenticated, streaming, or partial responses.
+ */
+export function responseMayBeStored(request: Request, response: Response): boolean {
+  if (request.method !== "GET" || request.cache === "no-store") return false;
+  if (request.headers.has("authorization") || request.headers.has("range")) return false;
+  if (!response.ok || response.status === 204 || response.status === 205 || response.status === 206) {
+    return false;
+  }
+
+  const directives = cacheControlDirectives(response.headers);
+  if (directives.has("no-store") || directives.has("private")) return false;
+  if ((response.headers.get("vary") ?? "").split(",").some((value) => value.trim() === "*")) {
+    return false;
+  }
+  const type = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (type.startsWith("text/event-stream")) return false;
+  return !response.headers.has("content-range");
+}
+
+/** A fresh answer which makes any older stored representation unsafe/invalid. */
+export function responseForbidsStoredFallback(response: Response): boolean {
+  if (response.status === 404 || response.status === 410) return true;
+  const directives = cacheControlDirectives(response.headers);
+  if (directives.has("no-store") || directives.has("private")) return true;
+  return (response.headers.get("vary") ?? "")
+    .split(",")
+    .some((value) => value.trim() === "*");
+}
+
+function numericDirective(headers: Headers, name: string): number | undefined {
+  const wanted = name.toLowerCase();
+  for (const part of (headers.get("cache-control") ?? "").split(",")) {
+    const [key, raw] = part.trim().split("=", 2);
+    if (key?.toLowerCase() !== wanted || raw === undefined) continue;
+    const value = Number(raw.replace(/^\"|\"$/g, ""));
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  return undefined;
+}
+
+/** Whether an HTTP-semantics cache entry may be used without revalidation. */
+export function cachedResponseIsFresh(response: Response, now = Date.now()): boolean {
+  const directives = cacheControlDirectives(response.headers);
+  // must-revalidate constrains stale reuse; it does not make a still-fresh
+  // representation stale. no-cache, despite its name, requires validation on
+  // every use and is therefore handled differently.
+  if (directives.has("no-cache")) return false;
+  if (directives.has("immutable")) return true;
+
+  const maxAge = numericDirective(response.headers, "max-age");
+  const date = Date.parse(response.headers.get("date") ?? "");
+  const age = Number(response.headers.get("age") ?? "0");
+  if (maxAge !== undefined && Number.isFinite(date)) {
+    const apparentAgeMs = Math.max(
+      Math.max(0, now - date),
+      Number.isFinite(age) && age > 0 ? age * 1000 : 0
+    );
+    return apparentAgeMs < maxAge * 1000;
+  }
+
+  const expires = Date.parse(response.headers.get("expires") ?? "");
+  return Number.isFinite(expires) && now < expires;
 }
 
 /** One connection for the metadata store; see idb.ts for why. */
@@ -120,6 +197,7 @@ const meta = sharedIdb({
  * on one page — so it is held briefly rather than re-read per write.
  */
 const BUDGET_TTL_MS = 30_000;
+const STORAGE_ESTIMATE_TIMEOUT_MS = 500;
 let budgetValue: number | null = null;
 let budgetFor: CacheBudget | null = null;
 let budgetAt = 0;
@@ -141,13 +219,23 @@ export async function effectiveBudget(config: CacheBudget): Promise<number> {
   }
 
   let budget = config.budgetBytes;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const { quota } = await navigator.storage.estimate();
+    const estimate = navigator.storage.estimate();
+    const result = await Promise.race([
+      estimate,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), STORAGE_ESTIMATE_TIMEOUT_MS);
+      })
+    ]);
+    const quota = result?.quota;
     if (typeof quota === "number" && quota > 0) {
       budget = Math.min(config.budgetBytes, Math.floor(quota * config.maxQuotaShare));
     }
   } catch {
     // estimate() can throw in odd storage states; fall through to the ceiling.
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
   budgetValue = budget;
   budgetFor = { budgetBytes: config.budgetBytes, maxQuotaShare: config.maxQuotaShare };
@@ -503,6 +591,21 @@ export async function forget(url: string): Promise<void> {
   await forgetEntry(url);
 }
 
+/** Removes a representation whose validator now reports it deleted/private. */
+export async function removeCached(request: Request, policy: CachePolicy): Promise<void> {
+  const cacheName = cacheNameFor(policy);
+  if (!cacheName) return;
+  try {
+    const cache = await openCache(cacheName);
+    await cache.delete(request);
+  } catch {
+    /* a stale fallback is optional; deletion failure must not fail the fetch */
+  }
+  if (policy === "cache-first-lru" || policy === "revalidate-lru") {
+    await forget(request.url);
+  }
+}
+
 /**
  * Stores a response under a bounded budget.
  *
@@ -516,7 +619,7 @@ export async function putBounded(
   config: CacheBudget = DEFAULT_CACHE
 ): Promise<void> {
   const cacheName = cacheNameFor(policy);
-  if (!cacheName) return;
+  if (!cacheName || !responseMayBeStored(request, response)) return;
 
   // Never cache a partial. Chrome rejects `cache.put()` outright for 206 with
   // "Partial response (status code 206) is unsupported" — verified, and not
@@ -540,15 +643,19 @@ async function putBodyBounded(
 ): Promise<void> {
   const cacheName = cacheNameFor(policy);
   if (!cacheName) return;
-  const bounded = policy === "cache-first-lru";
+  const bounded = policy === "cache-first-lru" || policy === "revalidate-lru";
   const size = body.size;
 
   // Concurrent covers each ask "does mine fit?" before any of them has landed.
   // Holding the promised bytes is what makes those questions see each other.
   if (bounded) reservedBytes += size;
   try {
+    // CacheStorage and quota/metadata live in separate browser backends. Start
+    // opening the target while the bounded-LRU decision runs so a cold first
+    // write does not pay both cross-process round trips serially.
+    const cachePromise = openCache(cacheName);
     if (bounded) await ensureRoom(config);
-    const cache = await openCache(cacheName);
+    const cache = await cachePromise;
     await cache.put(request, new Response(body, {
       status: response.status,
       statusText: response.statusText,
@@ -588,13 +695,10 @@ export function cacheWhileConsumed(
   policy: CachePolicy,
   config: CacheBudget = DEFAULT_CACHE
 ): Response {
+  if (!responseMayBeStored(request, response)) return response;
   if (
-    !cacheNameFor(policy) ||
-    response.status === 206 ||
-    !response.ok ||
-    !response.body ||
-    response.bodyUsed ||
-    response.body.locked
+    !cacheNameFor(policy) || response.status === 206 || !response.ok ||
+    !response.body || response.bodyUsed || response.body.locked
   ) {
     return response;
   }
@@ -729,7 +833,7 @@ export async function matchCached(
   try {
     const cache = await openCache(cacheName);
     const hit = await cache.match(request);
-    if (hit && policy === "cache-first-lru") {
+    if (hit && (policy === "cache-first-lru" || policy === "revalidate-lru")) {
       // Buffered: a grid of covers becomes one transaction, not one each.
       noteUse(request.url, contentLength(hit.headers));
     }

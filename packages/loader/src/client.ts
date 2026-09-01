@@ -55,13 +55,17 @@ import {
 import { clientUrls } from "./sources.js";
 import type { YuriRTCConfig } from "./config.js";
 import type { InjectedBootstrap } from "./inject.js";
-import { requestPriority } from "./routing.js";
+import { isIncrementalAsset, requestPriority } from "./routing.js";
 import {
   WORKER_UPGRADE_GRACE_MS,
   WorkerProtocolMismatchError,
   isCurrentWorkerProtocol,
   waitForActivatedWorker
 } from "./worker-rollout.js";
+import {
+  ResponseGoodputMonitor,
+  forceAnswerTransport
+} from "./adaptive-transport.js";
 
 /** Keep two MiB queued for throughput, then resume at one MiB to avoid churn. */
 const BUFFER_HIGH_WATER = 2 * 1024 * 1024;
@@ -125,6 +129,12 @@ interface StartingRequest {
   cancelled: boolean;
 }
 
+interface LaneWaiter {
+  head: RequestHead;
+  starting: StartingRequest;
+  resolve: (channel: RTCDataChannel | null) => void;
+}
+
 interface QueuedWorkerWake {
   generation: number;
   worker: ServiceWorker | undefined;
@@ -138,6 +148,11 @@ export interface ConnectionDiagnostics {
   };
   signalBackend: string;
   signalElapsedMs: number;
+}
+
+export interface ConnectionOptions {
+  /** Restrict the node's remote ICE candidates for this connection attempt. */
+  transport?: "auto" | "tcp";
 }
 
 export class YuriRTCClient {
@@ -175,10 +190,20 @@ export class YuriRTCClient {
   private connectionGeneration = 0;
   private iceDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly channelLoads = new Map<RTCDataChannel, number>();
+  private readonly laneWaiters: LaneWaiter[] = [];
   private readonly channelOpenPromises = new Map<RTCDataChannel, Promise<void>>();
   private bulkOpening: Promise<void> | null = null;
   private bulkIdleTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly disconnectListeners = new Set<(reason: string) => void>();
+  private readonly adaptiveTcpListeners = new Set<() => void>();
+  private readonly drainedListeners = new Set<() => void>();
+  private readonly responseGoodput: ResponseGoodputMonitor;
+  private readonly adaptiveTcpEnabled: boolean;
+  private adaptiveTcpPending = false;
+  /** Public calls on a boot() result follow the currently promoted route. */
+  private successor: YuriRTCClient | null = null;
+  /** A warmed successor returns SW responses through the original single port. */
+  private bridgeOutput: ((message: PageToSw, transfer?: Transferable[]) => void) | null = null;
 
   /** A restarted worker has no private port, so its wake-up arrives globally. */
   private readonly onServiceWorkerMessage = (event: MessageEvent): void => {
@@ -204,12 +229,45 @@ export class YuriRTCClient {
     private readonly config: YuriRTCConfig,
     /** Canonical static shell path; injected pages may only forward the persisted value. */
     private readonly shellPath?: string
-  ) {}
+  ) {
+    const adaptive = config.transport?.adaptiveTcp;
+    this.adaptiveTcpEnabled = adaptive?.enabled !== false;
+    this.responseGoodput = new ResponseGoodputMonitor(adaptive);
+  }
 
   /** Receives one coalesced callback when the peer's transport becomes terminal. */
   onDisconnect(listener: (reason: string) => void): () => void {
     this.disconnectListeners.add(listener);
     return () => this.disconnectListeners.delete(listener);
+  }
+
+  /**
+   * Reports one evidence-based TCP recommendation as soon as a sustained slow
+   * UDP sample is known. The owner may warm a replacement without interrupting
+   * work already assigned to this route.
+   */
+  onAdaptiveTcpSuggested(listener: () => void): () => void {
+    this.adaptiveTcpListeners.add(listener);
+    if (this.adaptiveTcpPending) queueMicrotask(listener);
+    return () => this.adaptiveTcpListeners.delete(listener);
+  }
+
+  /** Runs when this exact route has no HTTP starts, responses, or sockets. */
+  onDrained(listener: () => void): () => void {
+    this.drainedListeners.add(listener);
+    if (!this.hasActiveWork()) queueMicrotask(listener);
+    return () => this.drainedListeners.delete(listener);
+  }
+
+  /** Keep an object returned by boot() useful after its transport is promoted. */
+  adoptSuccessor(successor: YuriRTCClient): void {
+    if (successor === this) return;
+    this.successor = successor;
+    successor.bridgeOutput = (message, transfer = []) => this.post(message, transfer);
+    successor.onDisconnect((reason) => {
+      if (this.successor !== successor) return;
+      for (const listener of this.disconnectListeners) listener(reason);
+    });
   }
 
   /**
@@ -220,7 +278,11 @@ export class YuriRTCClient {
    * single-file diagnostic page possible — a SW script must be same-origin and
    * cannot be inlined, but the transport itself has no such constraint.
   */
-  async connect(registration?: ServiceWorkerRegistration): Promise<ConnectionDiagnostics> {
+  async connect(
+    registration?: ServiceWorkerRegistration,
+    options: ConnectionOptions = {}
+  ): Promise<ConnectionDiagnostics> {
+    if (this.successor) return this.successor.connect(registration, options);
     if (this.pc) this.close();
     const generation = ++this.connectionGeneration;
     this.reattaching = null;
@@ -264,23 +326,25 @@ export class YuriRTCClient {
         onLegFailure: (name) => console.warn(`[YuriRTC] signal leg ${name} failed`)
       });
       this.assertCurrent(pc, generation);
-      await this.applyAnswer(pc, result.answer);
+      await this.applyAnswer(pc, result.answer, options.transport ?? "auto");
       await opened;
       this.assertCurrent(pc, generation);
 
+      // Establish all SCTP streams before the first application waterfall. The
+      // lanes remain one association/cwnd, but separate ordered streams prevent
+      // a large incremental asset from head-of-line blocking small critical
+      // files. Idle retirement still bounds long-lived node memory.
+      await this.ensureBulkChannels();
+      this.assertCurrent(pc, generation);
+
       if (registration) {
-        this.registration = registration;
-        if (!this.listeningForWorkerWake) {
-          navigator.serviceWorker.addEventListener("message", this.onServiceWorkerMessage);
-          window.addEventListener("pagehide", this.onPageHide);
-          this.listeningForWorkerWake = true;
-        }
-        await this.attachToServiceWorker(registration, generation);
+        await this.attach(registration, generation);
         this.assertCurrent(pc, generation);
       }
       const route = await selectedPair(pc);
       this.assertCurrent(pc, generation);
       if (this.transportDown) throw new Error("transport closed while connecting");
+      this.responseGoodput.setTransport(route.route.transport);
       return { ...route, signalBackend: result.backend, signalElapsedMs: result.elapsedMs };
     } catch (error) {
       if (this.isCurrent(pc, generation)) {
@@ -289,6 +353,23 @@ export class YuriRTCClient {
       }
       throw error;
     }
+  }
+
+  /** Attach an already-open route after a bounded probe or background warm-up. */
+  async attach(
+    registration: ServiceWorkerRegistration,
+    generation = this.connectionGeneration
+  ): Promise<void> {
+    if (!this.transportIsOpen() || generation !== this.connectionGeneration) {
+      throw new Error("transport is not open");
+    }
+    this.registration = registration;
+    if (!this.listeningForWorkerWake) {
+      navigator.serviceWorker.addEventListener("message", this.onServiceWorkerMessage);
+      window.addEventListener("pagehide", this.onPageHide);
+      this.listeningForWorkerWake = true;
+    }
+    await this.attachToServiceWorker(registration, generation);
   }
 
   private backends(): SignalBackend[] {
@@ -330,9 +411,14 @@ export class YuriRTCClient {
     }
   }
 
-  private async applyAnswer(pc: RTCPeerConnection, answer: AnswerBlob): Promise<void> {
-    await pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
-    for (const candidate of answer.candidates) {
+  private async applyAnswer(
+    pc: RTCPeerConnection,
+    answer: AnswerBlob,
+    transport: "auto" | "tcp"
+  ): Promise<void> {
+    const selected = transport === "tcp" ? forceAnswerTransport(answer, "tcp") : answer;
+    await pc.setRemoteDescription({ type: "answer", sdp: selected.sdp });
+    for (const candidate of selected.candidates) {
       if (!candidate.candidate) continue;
       await pc.addIceCandidate(candidate).catch(() => {
         // Candidate strings contain server addresses. Never include the RTC
@@ -421,11 +507,16 @@ export class YuriRTCClient {
       if (this.port === channel.port1) this.onSwMessage(event.data);
     };
     channel.port1.start();
-    // Send every source, with the one this copy actually loaded from first —
-    // it is demonstrably reachable on this network, so injected pages should
-    // try it before anything else.
+    // A bundled carrier supplies a durable same-origin source first. The URL
+    // this copy loaded from follows for ordinary CDN builds; for an inline
+    // Blob it is intentionally only a fallback because that URL may be revoked
+    // as soon as the first import completes.
     const here = new URL(import.meta.url).href;
-    const urls = [here, ...clientUrls().filter((u) => u !== here)];
+    const urls = [...new Set([
+      ...(this.config.recovery?.clientUrls ?? []),
+      here,
+      ...clientUrls()
+    ])];
     const bootstrap: InjectedBootstrap = {
       clientUrls: urls,
       config: this.config,
@@ -477,6 +568,10 @@ export class YuriRTCClient {
       this.direct.get(message.id)?.(message);
       return;
     }
+    if (this.bridgeOutput) {
+      this.bridgeOutput(message, transfer);
+      return;
+    }
     this.port?.postMessage(message, transfer);
   }
 
@@ -487,7 +582,13 @@ export class YuriRTCClient {
    * it exactly as they would a normal fetch — the point being that the app
    * cannot tell the difference, which is the transport's central contract.
    */
-  async request(url: string, init: { method?: string; headers?: HeadersInit } = {}): Promise<Response> {
+  async request(url: string, init: {
+    method?: string;
+    headers?: HeadersInit;
+    /** Internal diagnostics may start with a one-frame window for a fair barrier. */
+    initialCredits?: number;
+  } = {}): Promise<Response> {
+    if (this.successor) return this.successor.request(url, init);
     const channel = this.channel;
     if (!channel || channel.readyState !== "open") throw new Error("data channel not open");
 
@@ -507,7 +608,12 @@ export class YuriRTCClient {
       priority,
       // Direct mode is diagnostic-only and has no service-worker pull signal.
       // Keep one bounded maximum window and replenish as frames are delivered.
-      initialCredits: MAX_RESPONSE_CREDITS
+      initialCredits:
+        Number.isInteger(init.initialCredits) &&
+        init.initialCredits! > 0 &&
+        init.initialCredits! <= MAX_RESPONSE_CREDITS
+          ? init.initialCredits!
+          : MAX_RESPONSE_CREDITS
     };
 
     let onHead!: (h: ResponseHead) => void;
@@ -643,12 +749,16 @@ export class YuriRTCClient {
   private onSwMessage(message: SwToPage, wakeWorker?: ServiceWorker): void {
     switch (message.t) {
       case "req": {
-        void this.startRequest(message.id, message.head, message.body);
+        const route = this.successor ?? this;
+        void route.startRequest(message.id, message.head, message.body);
         break;
       }
       case "credit": {
         const requestId = this.requestBySw.get(message.id);
-        if (requestId === undefined) return;
+        if (requestId === undefined) {
+          this.successor?.onSwMessage(message);
+          return;
+        }
         const state = this.outbound.get(requestId);
         if (!state) return;
         if (
@@ -673,9 +783,14 @@ export class YuriRTCClient {
         }
         break;
       }
-      case "cancel":
-        this.cancelRequest(message.id);
+      case "cancel": {
+        if (this.requestBySw.has(message.id) || this.startingRequests.has(message.id)) {
+          this.cancelRequest(message.id);
+        } else {
+          this.successor?.onSwMessage(message);
+        }
         break;
+      }
       case "attached": {
         const waiter = this.attachWaiter;
         if (!waiter || waiter.generation !== this.connectionGeneration) return;
@@ -804,7 +919,12 @@ export class YuriRTCClient {
         }
       }
       if (starting.cancelled) return;
-      const channel = this.chooseChannel(head.priority);
+      const scheduled = this.acquireScheduledChannel(head, starting);
+      const channel = scheduled instanceof Promise ? await scheduled : scheduled;
+      if (starting.cancelled) {
+        if (channel) this.releaseChannelReservation(channel);
+        return;
+      }
       if (!channel) {
         this.post({ t: "err", id: swId, message: "data channel not open" });
         return;
@@ -817,7 +937,7 @@ export class YuriRTCClient {
         credit: head.initialCredits
       });
       this.inbound.set(requestId, { swId, channel });
-      this.channelLoads.set(channel, (this.channelLoads.get(channel) ?? 0) + 1);
+      this.responseGoodput.beginRequest(requestId, head.method);
       const requestAbort = new AbortController();
       this.requestAbortControllers.set(requestId, requestAbort);
       if (head.hasBody) this.uploads.set(requestId, { credits: 0, waiter: undefined });
@@ -851,6 +971,7 @@ export class YuriRTCClient {
       if (this.startingRequests.get(swId) === starting) {
         this.startingRequests.delete(swId);
       }
+      this.maybeNotifyDrained();
     }
   }
 
@@ -892,6 +1013,7 @@ export class YuriRTCClient {
       starting.cancelled = true;
       failedSwIds.add(swId);
     }
+    for (const id of this.successor?.retireWorkerBridgeRequests() ?? []) failedSwIds.add(id);
     return failedSwIds;
   }
 
@@ -905,6 +1027,7 @@ export class YuriRTCClient {
    * other address that crosses the carrier.
    */
   openWebSocket(url: string, protocols: string | string[] = []): CarriedWebSocket {
+    if (this.successor) return this.successor.openWebSocket(url, protocols);
     const channel = this.chooseChannel(RequestPriority.Interactive);
     const requestId = this.nextRequestId();
     const list = typeof protocols === "string" ? (protocols ? [protocols] : []) : protocols;
@@ -914,6 +1037,7 @@ export class YuriRTCClient {
       sendClose: (id, payload) => this.send(encodeFrame(FrameType.WsClose, id, payload), this.socketChannel(id)),
       release: id => {
         this.sockets.delete(id);
+        this.maybeNotifyDrained();
       }
     });
 
@@ -1013,6 +1137,17 @@ export class YuriRTCClient {
           return;
         }
         state.credit -= 1;
+        if (
+          this.adaptiveTcpEnabled &&
+          this.responseGoodput.recordBody(
+            frame.requestId,
+            frame.payload.byteLength,
+            performance.now()
+          )
+        ) {
+          this.adaptiveTcpPending = true;
+          for (const listener of this.adaptiveTcpListeners) listener();
+        }
         this.post(
           {
             t: "body",
@@ -1325,20 +1460,20 @@ export class YuriRTCClient {
         else resolve();
       };
       const timer = setTimeout(() => {
-        settle(new Error("transport lane open timed out"));
+        settle(new Error(`transport lane ${lane} open timed out`));
         if (generation === this.connectionGeneration) channel.close();
       }, CHANNEL_OPEN_TIMEOUT_MS);
       (timer as unknown as { unref?: () => void }).unref?.();
 
       channel.onopen = () => settle();
       channel.onclose = () => {
-        settle(new Error("transport lane closed before opening"));
+        settle(new Error(`transport lane ${lane} closed before opening`));
         this.handleChannelClose(channel, lane, generation);
       };
       // Do not pass the RTC error object through logs or UI: implementations
       // may include candidate details. The actionable failure is generic.
       channel.onerror = () => {
-        settle(new Error("transport lane failed to open"));
+        settle(new Error(`transport lane ${lane} failed to open`));
         if (generation === this.connectionGeneration && channel.readyState !== "closed") {
           channel.close();
         }
@@ -1400,6 +1535,7 @@ export class YuriRTCClient {
         if (generation !== this.connectionGeneration || pc !== this.pc) {
           throw new Error("bulk lane opening superseded");
         }
+        this.scheduleBulkIdleClose();
       })
       .finally(() => {
         this.bulkOpening = null;
@@ -1437,7 +1573,7 @@ export class YuriRTCClient {
   }
 
   private transportIsOpen(): boolean {
-    return this.channel?.readyState === "open";
+    return this.channel?.readyState === "open" || this.successor?.transportIsOpen() === true;
   }
 
   /**
@@ -1445,15 +1581,24 @@ export class YuriRTCClient {
    * requests use the least-loaded one of lanes 1-3, which lets SCTP's separate
    * ordered streams avoid cross-asset head-of-line blocking on UDP.
    */
-  private chooseChannel(priority: RequestPriority): RTCDataChannel | null {
+  private chooseChannel(priority: RequestPriority, logicalPath = ""): RTCDataChannel | null {
     const all = (this.channels.length > 0 ? this.channels : this.channel ? [this.channel] : [])
       .filter((channel) => channel.readyState === "open");
     if (all.length === 0) return null;
     if (priority === RequestPriority.Interactive || all.length === 1) return all[0]!;
 
     const bulk = all.slice(1);
-    let selected = bulk[0] ?? all[0]!;
-    for (const channel of bulk.slice(1)) {
+    // Lane one is the small critical-file reserve. Large/incremental formats
+    // and ordinary assets fill lanes two and three, so a game payload cannot
+    // make a stylesheet or bootstrap script wait behind it. An older worker
+    // may still label WASM Critical, hence the URL guard as well as priority.
+    const isIncremental = priority === RequestPriority.Bulk || isIncrementalAsset(logicalPath);
+    if (priority === RequestPriority.Critical && !isIncremental) return bulk[0] ?? all[0]!;
+    const candidates = isIncremental || priority === RequestPriority.Normal
+      ? (bulk.slice(1).length > 0 ? bulk.slice(1) : bulk)
+      : bulk;
+    let selected = candidates[0] ?? bulk[0] ?? all[0]!;
+    for (const channel of candidates.slice(1)) {
       const selectedLoad = this.channelLoads.get(selected) ?? 0;
       const load = this.channelLoads.get(channel) ?? 0;
       if (
@@ -1464,6 +1609,53 @@ export class YuriRTCClient {
       }
     }
     return selected;
+  }
+
+  /**
+   * Reserve at most one non-critical request on each non-reserved bulk lane.
+   * The node admits three noninteractive handlers, so this leaves its third
+   * slot available for lane one's critical file even during a game waterfall.
+   */
+  private acquireScheduledChannel(
+    head: RequestHead,
+    starting: StartingRequest
+  ): RTCDataChannel | null | Promise<RTCDataChannel | null> {
+    const constrained =
+      head.priority === RequestPriority.Normal ||
+      head.priority === RequestPriority.Bulk ||
+      isIncrementalAsset(head.url);
+    const available = this.chooseChannel(head.priority, head.url);
+    if (!constrained || (available && (this.channelLoads.get(available) ?? 0) < 1)) {
+      if (available) this.channelLoads.set(available, (this.channelLoads.get(available) ?? 0) + 1);
+      return available;
+    }
+    return new Promise((resolve) => {
+      this.laneWaiters.push({ head, starting, resolve });
+    });
+  }
+
+  private releaseChannelReservation(channel: RTCDataChannel): void {
+    if (this.channelLoads.has(channel)) {
+      this.channelLoads.set(channel, Math.max(0, (this.channelLoads.get(channel) ?? 1) - 1));
+    }
+    this.releaseLaneWaiters();
+  }
+
+  /** Strict FIFO among bounded bulk/normal starts prevents a busy stream from starving a waiter. */
+  private releaseLaneWaiters(): void {
+    while (this.laneWaiters.length > 0) {
+      const waiter = this.laneWaiters[0]!;
+      if (waiter.starting.cancelled) {
+        this.laneWaiters.shift();
+        waiter.resolve(null);
+        continue;
+      }
+      const channel = this.chooseChannel(waiter.head.priority, waiter.head.url);
+      if (!channel || (this.channelLoads.get(channel) ?? 0) >= 1) return;
+      this.laneWaiters.shift();
+      this.channelLoads.set(channel, (this.channelLoads.get(channel) ?? 0) + 1);
+      waiter.resolve(channel);
+    }
   }
 
   private handleChannelClose(
@@ -1478,6 +1670,7 @@ export class YuriRTCClient {
     }
 
     this.removeChannel(channel);
+    this.releaseLaneWaiters();
     const failed = [...this.inbound.entries()].filter(([, entry]) => entry.channel === channel);
     for (const [requestId, entry] of failed) {
       this.post({ t: "err", id: entry.swId, message: "asset transport lane closed" });
@@ -1495,7 +1688,10 @@ export class YuriRTCClient {
     const requestId = this.requestBySw.get(swId);
     if (requestId === undefined) {
       const starting = this.startingRequests.get(swId);
-      if (starting) starting.cancelled = true;
+      if (starting) {
+        starting.cancelled = true;
+        this.releaseLaneWaiters();
+      }
       return;
     }
     const channel = this.inbound.get(requestId)?.channel;
@@ -1512,6 +1708,7 @@ export class YuriRTCClient {
   private finish(requestId: number): void {
     const swId = this.swByRequest.get(requestId);
     const channel = this.inbound.get(requestId)?.channel;
+    this.responseGoodput.endRequest(requestId);
     this.requestAbortControllers.get(requestId)?.abort();
     this.requestAbortControllers.delete(requestId);
     this.uploads.delete(requestId);
@@ -1522,21 +1719,45 @@ export class YuriRTCClient {
       this.requestBySw.delete(swId);
     }
     if (channel && this.channelLoads.has(channel)) {
-      this.channelLoads.set(channel, Math.max(0, (this.channelLoads.get(channel) ?? 1) - 1));
+      this.releaseChannelReservation(channel);
       if (channel !== this.channel) this.scheduleBulkIdleClose();
     }
+    this.maybeNotifyDrained();
+  }
+
+  private hasActiveWork(): boolean {
+    return this.inbound.size > 0 || this.startingRequests.size > 0 || this.sockets.size > 0;
+  }
+
+  private maybeNotifyDrained(): void {
+    if (this.hasActiveWork()) return;
+    for (const listener of this.drainedListeners) listener();
   }
 
   private teardown(reason: string): void {
     if (this.transportDown) return;
     this.transportDown = true;
+    const successorHealthy = this.successor?.transportIsOpen() === true;
+    const failedSwIds = successorHealthy
+      ? new Set([
+          ...[...this.swByRequest.values()].filter((id) => id > 0),
+          ...[...this.startingRequests.keys()].filter((id) => id > 0)
+        ])
+      : null;
     this.queuedWorkerWake = null;
     this.clearIceDisconnectTimer();
     this.rejectAttachWaiter(new Error("service worker attachment interrupted"));
     // Sockets are page-owned and outlive individual requests, so nothing else
     // in this teardown reaches them.
     this.failAllSockets(reason);
-    this.post({ t: "down", reason });
+    if (failedSwIds) {
+      // The worker's one MessagePort is also the router for the healthy
+      // successor. Fail only ids which belonged to this old route; a global
+      // DOWN would incorrectly destroy new TCP requests as well.
+      for (const id of failedSwIds) this.post({ t: "err", id, message: `transport down: ${reason}` });
+    } else {
+      this.post({ t: "down", reason });
+    }
     const direct = [...this.direct.entries()];
     this.direct.clear();
     for (const [id, collect] of direct) {
@@ -1553,13 +1774,33 @@ export class YuriRTCClient {
     // until each start coroutine unwinds so it cannot create fresh wire work on
     // a transport the worker already considers down.
     for (const starting of this.startingRequests.values()) starting.cancelled = true;
+    for (const waiter of this.laneWaiters.splice(0)) waiter.resolve(null);
     this.channelLoads.clear();
     this.channelOpenPromises.clear();
     this.cancelBulkIdleClose();
+    this.responseGoodput.setTransport("unknown");
+    this.maybeNotifyDrained();
+    if (successorHealthy) {
+      const pc = this.pc;
+      if (pc) this.releaseConnection(pc, this.connectionGeneration, true);
+      // This object still owns the live SW router port; only its predecessor
+      // RTC association is down. Keep attachment/wake guards available for the
+      // successor and future worker restarts.
+      this.transportDown = false;
+      return;
+    }
     for (const listener of this.disconnectListeners) listener(reason);
   }
 
   close(): void {
+    const successor = this.successor;
+    this.successor = null;
+    this.retireRoute();
+    successor?.close();
+  }
+
+  /** Close only this route after its requests drain, preserving its successor. */
+  retireRoute(): void {
     this.teardown("carrier closed");
     const pc = this.pc;
     const generation = this.connectionGeneration;
@@ -1571,6 +1812,15 @@ export class YuriRTCClient {
     this.releasePageHooks();
     this.port?.close();
     this.port = null;
+  }
+
+  /** Close only this client's RTC association while retaining its SW router port. */
+  retireTransport(): void {
+    if (this.hasActiveWork()) throw new Error("cannot retire a transport with active work");
+    const pc = this.pc;
+    if (!pc) return;
+    this.responseGoodput.setTransport("unknown");
+    this.releaseConnection(pc, this.connectionGeneration, true);
   }
 
   private isCurrent(pc: RTCPeerConnection, generation: number): boolean {
@@ -1700,12 +1950,16 @@ export class YuriRTCClient {
     }
   }
 
-  private releaseConnection(pc: RTCPeerConnection, generation: number): void {
+  private releaseConnection(
+    pc: RTCPeerConnection,
+    generation: number,
+    preserveBridge = false
+  ): void {
     if (!this.isCurrent(pc, generation)) return;
     this.connectionGeneration += 1;
     this.clearIceDisconnectTimer();
     this.rejectAttachWaiter(new Error("connection closed"));
-    this.releasePageHooks();
+    if (!preserveBridge) this.releasePageHooks();
     const channels = new Set(
       this.channels.length > 0 ? this.channels : this.channel ? [this.channel] : []
     );
@@ -1720,8 +1974,10 @@ export class YuriRTCClient {
     for (const channel of channels) channel.close();
     pc.oniceconnectionstatechange = null;
     pc.close();
-    this.port?.close();
-    this.port = null;
+    if (!preserveBridge) {
+      this.port?.close();
+      this.port = null;
+    }
   }
 }
 

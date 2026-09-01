@@ -1,5 +1,6 @@
 node_modules/
 dist/
+packages/integrity/loader.json
 *.tsbuildinfo
 *.tgz
 coverage/
@@ -8,6 +9,7 @@ coverage/
 # build script stay tracked under deploy/npm/src and deploy/npm/build.mjs.
 deploy/npm/index.html
 deploy/npm/sw.js
+deploy/npm/bundled/
 # Per-deployment copies of that generated pair, one directory per destination.
 deploy/npm/deployments/
 .env

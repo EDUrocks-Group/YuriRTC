@@ -231,6 +231,66 @@ func TestMultiPortTransportAdvertisesEveryUDPAndTCPPort(t *testing.T) {
 	}
 }
 
+func TestProtocolSpecificTransportDoesNotAttachDisabledMux(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		networkType webrtc.NetworkType
+		protocol    string
+	}{
+		{name: "udp", networkType: webrtc.NetworkTypeUDP4, protocol: "udp"},
+		{name: "tcp", networkType: webrtc.NetworkTypeTCP4, protocol: "tcp"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bindIP := net.IPv4(127, 0, 0, 1)
+			rtc, err := buildTransport(options{
+				bindIP:       bindIP.String(),
+				publicIP:     bindIP.String(),
+				ports:        freeDualPorts(t, bindIP, 1),
+				networkTypes: []webrtc.NetworkType{test.networkType},
+			})
+			if err != nil {
+				t.Fatalf("build %s transport: %v", test.name, err)
+			}
+			defer rtc.Close()
+
+			pc, err := rtc.API.NewPeerConnection(webrtc.Configuration{})
+			if err != nil {
+				t.Fatalf("new %s peer: %v", test.name, err)
+			}
+			defer pc.Close()
+			if _, err := pc.CreateDataChannel("protocol-specific-candidate-test", nil); err != nil {
+				t.Fatalf("create %s data channel: %v", test.name, err)
+			}
+			offer, err := pc.CreateOffer(nil)
+			if err != nil {
+				t.Fatalf("create %s offer: %v", test.name, err)
+			}
+			gathered := webrtc.GatheringCompletePromise(pc)
+			if err := pc.SetLocalDescription(offer); err != nil {
+				t.Fatalf("set %s local description: %v", test.name, err)
+			}
+			select {
+			case <-gathered:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s ICE gathering did not complete", test.name)
+			}
+			local := pc.LocalDescription()
+			if local == nil {
+				t.Fatalf("%s ICE gathering completed without a local description", test.name)
+			}
+			candidates := parseSDPCandidates(t, local.SDP)
+			if len(candidates) == 0 {
+				t.Fatalf("%s transport gathered no candidates", test.name)
+			}
+			for _, candidate := range candidates {
+				if candidate.protocol != test.protocol {
+					t.Errorf("%s-only transport advertised %s candidate", test.protocol, candidate.protocol)
+				}
+			}
+		})
+	}
+}
+
 func TestDisabledMDNSStillAllowsBrowserInitiatedChecks(t *testing.T) {
 	bindIP := net.IPv4(127, 0, 0, 1)
 	ports := freeDualPorts(t, bindIP, 3)

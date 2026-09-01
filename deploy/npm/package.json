@@ -11,9 +11,12 @@
   "scripts": {
     "build": "node build.mjs",
     "build:release": "node build.mjs --release",
+    "build:bundled": "node build.mjs --bundled-loader --out-dir bundled",
+    "build:release:bundled": "node build.mjs --release --bundled-loader --out-dir bundled",
     "test": "node --test --test-concurrency=1 'test/*.test.mjs'",
     "prepack": "npm run build:release",
-    "verify:package": "node verify-package.mjs"
+    "verify:package": "node verify-package.mjs",
+    "verify:bundled": "node verify-package.mjs --artifacts-only --bundled-loader --artifact-dir bundled"
   },
   "keywords": [
     "webrtc"
@@ -21,6 +24,7 @@
   "author": "edurocks-group",
   "license": "MIT",
   "devDependencies": {
+    "esbuild": "^0.28.1",
     "html-minifier-terser": "^7.2.0",
     "javascript-obfuscator": "^5.5.0",
     "playwright-core": "1.62.1"

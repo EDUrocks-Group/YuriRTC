@@ -26,11 +26,20 @@ type recordingResponseSender struct {
 	ends         []uint32
 	bulkAcquires int
 	bulkReleases int
+	probeClaimed bool
 }
 
 func (r *recordingResponseSender) AcquireBulk(context.Context) (func(), error) {
 	r.bulkAcquires++
 	return func() { r.bulkReleases++ }, nil
+}
+
+func (r *recordingResponseSender) ClaimRouteProbe() bool {
+	if r.probeClaimed {
+		return false
+	}
+	r.probeClaimed = true
+	return true
 }
 
 func (r *recordingResponseSender) SendHead(_ uint32, head ResponseHead) error {

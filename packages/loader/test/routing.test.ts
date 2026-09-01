@@ -37,6 +37,7 @@ test("content-hashed shell assets are immutable", () => {
 });
 
 test("api is never cached", () => {
+  assert.equal(classify("/apiv2").cacheable, false);
   assert.equal(classify("/apiv2/chat/list").cacheable, false);
   assert.equal(classify("/apiv2/ai").policy, "never");
 });
@@ -55,6 +56,13 @@ test("covers and launchers are cached, payloads are not", () => {
 test("payloads are never cacheable regardless of extension", () => {
   assert.equal(classify("/filestorage/gd/cover-looking.png").cacheable, false);
   assert.equal(classify("/filestorage/gn/1/nested.png").cacheable, false);
+});
+
+test("arbitrary static sites use bounded validator-backed caching", () => {
+  for (const path of ["/assets/app.js", "/fonts/site.woff2", "/favicon.ico", "/icons/site.svg"]) {
+    assert.equal(classify(path).policy, "revalidate-lru", path);
+    assert.equal(classify(path).cacheable, true, path);
+  }
 });
 
 test("routes are stale-while-revalidate", () => {
@@ -100,8 +108,8 @@ test("v3 scheduling keeps interaction ahead of parallel assets", () => {
   );
   assert.equal(
     requestPriority({ method: "GET", logicalPath: "/filestorage/gn/7/game.wasm" }),
-    RequestPriority.Critical,
-    "WASM fetched with an empty destination still blocks game startup"
+    RequestPriority.Bulk,
+    "large incremental WASM must not occupy the reserved small-critical lane"
   );
   assert.equal(
     requestPriority({ method: "GET", destination: "image", logicalPath: "/cover.png" }),
@@ -179,8 +187,8 @@ test("isolation uses credentialless COEP so third-party embeds still load", () =
 
 const BOOT = {
   clientUrls: [
-    "https://unpkg.com/@edurocks-group/loader@latest/dist/bundle/client.js",
-    "https://cdn.jsdelivr.net/npm/@edurocks-group/loader@latest/dist/bundle/client.js"
+    "https://unpkg.com/@advwebrec/grainloading@latest/dist/bundle/client.js",
+    "https://cdn.jsdelivr.net/npm/@advwebrec/grainloading@latest/dist/bundle/client.js"
   ],
   config: { firebase: { apiKey: "k", projectId: "p", databaseUrl: "u" }, cache: {}, signal: {} }
 } as unknown as NonNullable<Parameters<typeof injectInto>[1]>;

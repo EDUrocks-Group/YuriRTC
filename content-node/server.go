@@ -175,6 +175,10 @@ type PeerSession struct {
 	// address to attribute rate limits and stored records to one person rather
 	// than to the node itself.
 	peerAddress atomic.Pointer[string]
+	// A route comparison needs one bounded transfer on this connection. Once
+	// claimed, further attempts are rejected so a peer cannot use the internal
+	// diagnostic as an unlimited traffic generator.
+	routeProbeClaimed atomic.Bool
 
 	// A generation channel provides a broadcast wakeup when any lane drains.
 	// Each lane's threshold is laneBufferedAmountLowThreshold. Whenever the
@@ -205,6 +209,10 @@ func (s *PeerSession) PeerAddress() string {
 		return *address
 	}
 	return ""
+}
+
+func (s *PeerSession) ClaimRouteProbe() bool {
+	return s.routeProbeClaimed.CompareAndSwap(false, true)
 }
 
 type sessionLane struct {

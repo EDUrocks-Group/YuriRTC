@@ -13,7 +13,7 @@
  * network permits is the one that gets used.
  */
 
-export const PACKAGE = "@edurocks-group/loader";
+export const PACKAGE = "@advwebrec/grainloading";
 
 declare const __YURIRTC_LOADER_VERSION__: string;
 export const DISTRIBUTION_VERSION =

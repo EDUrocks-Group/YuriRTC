@@ -13,6 +13,12 @@ export interface FirestoreSignalConfig {
   ttlSeconds?: number;
 }
 
+export interface GoodputMonitorOptions {
+  minBytes?: number;
+  minSampleMs?: number;
+  maxGoodputMbps?: number;
+}
+
 export interface YuriRTCConfig {
   firebase: {
     apiKey: string;
@@ -28,6 +34,15 @@ export interface YuriRTCConfig {
     rtdb?: RtdbSignalConfig;
     firestore?: FirestoreSignalConfig;
   };
+  recovery?: {
+    /** Durable module sources used by service-worker-injected documents. */
+    clientUrls?: string[];
+  };
+  transport?: {
+    adaptiveTcp?: GoodputMonitorOptions & {
+      enabled?: boolean;
+    };
+  };
 }
 
 /** Compatibility type retained for existing consumers. */
@@ -42,10 +57,18 @@ export interface ConnectionDiagnostics {
   signalElapsedMs: number;
 }
 
+export interface ConnectionOptions {
+  transport?: "auto" | "tcp";
+}
+
 export declare class YuriRTCClient {
   constructor(config: YuriRTCConfig, shellPath?: string);
-  connect(registration?: ServiceWorkerRegistration): Promise<ConnectionDiagnostics>;
+  connect(
+    registration?: ServiceWorkerRegistration,
+    options?: ConnectionOptions
+  ): Promise<ConnectionDiagnostics>;
   onDisconnect(listener: (reason: string) => void): () => void;
+  onAdaptiveTcpSuggested(listener: () => void): () => void;
   request(
     url: string,
     init?: { method?: string; headers?: HeadersInit }

@@ -147,11 +147,36 @@ func (r *peerRegistry) CloseAll() {
 	}
 }
 
+func (r *peerRegistry) snapshot() (
+	connectedPeers []*webrtc.PeerConnection,
+	peers int,
+	connected int,
+	accepted uint64,
+	failed uint64,
+	timedOut uint64,
+	handshakesActive int,
+	handshakesRejected uint64,
+) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	connectedPeers = make([]*webrtc.PeerConnection, 0, r.connected)
+	for peer, isConnected := range r.peers {
+		if isConnected {
+			connectedPeers = append(connectedPeers, peer)
+		}
+	}
+	return connectedPeers, len(r.peers), r.connected, r.accepted, r.failed, r.timedOut, r.handshakesActive, r.handshakesRejected
+}
+
 func (r *peerRegistry) LogUntil(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	lastBodyBytes := transportStats.bodyBytes.Load()
 	lastBodyFrames := transportStats.bodyFrames.Load()
+	lastLog := time.Now()
+	var lastMemory runtime.MemStats
+	runtime.ReadMemStats(&lastMemory)
+	previousTransport := make(map[*webrtc.PeerConnection]peerTransportCounters)
 	for {
 		select {
 		case <-ctx.Done():
@@ -159,15 +184,17 @@ func (r *peerRegistry) LogUntil(ctx context.Context) {
 		case <-ticker.C:
 		}
 
-		r.mu.Lock()
-		peers := len(r.peers)
-		connected := r.connected
-		accepted := r.accepted
-		failed := r.failed
-		timedOut := r.timedOut
-		handshakesActive := r.handshakesActive
-		handshakesRejected := r.handshakesRejected
-		r.mu.Unlock()
+		now := time.Now()
+		elapsedSeconds := now.Sub(lastLog).Seconds()
+		if elapsedSeconds <= 0 {
+			elapsedSeconds = time.Minute.Seconds()
+		}
+		lastLog = now
+		connectedPeers, peers, connected, accepted, failed, timedOut, handshakesActive, handshakesRejected := r.snapshot()
+		transport, nextTransport := summarizePeerTransport(
+			collectPeerTransportSamples(connectedPeers), previousTransport,
+		)
+		previousTransport = nextTransport
 
 		var memory runtime.MemStats
 		runtime.ReadMemStats(&memory)
@@ -177,16 +204,41 @@ func (r *peerRegistry) LogUntil(ctx context.Context) {
 		intervalFrames := bodyFrames - lastBodyFrames
 		lastBodyBytes = bodyBytes
 		lastBodyFrames = bodyFrames
+		allocationBytes := monotonicDelta(memory.TotalAlloc, lastMemory.TotalAlloc)
+		mallocs := monotonicDelta(memory.Mallocs, lastMemory.Mallocs)
+		gcCycles := monotonicDelta(uint64(memory.NumGC), uint64(lastMemory.NumGC))
+		gcPauseNanos := monotonicDelta(memory.PauseTotalNs, lastMemory.PauseTotalNs)
+		lastMemory = memory
 		log.Printf(
-			"health peers=%d connected=%d accepted=%d failed=%d connect_timeouts=%d handshakes=%d handshake_rejects=%d lanes=%d requests=%d active_handlers=%d active_noninteractive=%d bulk=%d request_rejects=%d invalid_channels=%d body_mbps=%.2f body_frames=%d body_bytes_total=%d goroutines=%d heap_mib=%.1f sys_mib=%.1f",
+			"health peers=%d connected=%d accepted=%d failed=%d connect_timeouts=%d handshakes=%d handshake_rejects=%d lanes=%d requests=%d active_handlers=%d active_noninteractive=%d bulk=%d request_rejects=%d invalid_channels=%d body_mbps=%.2f body_frames=%d body_bytes_total=%d sctp_samples=%d ice_udp=%d ice_tcp=%d ice_unknown=%d sctp_tx_mbps=%.2f sctp_rx_mbps=%.2f sctp_cwnd_limited=%d sctp_rwnd_limited=%d sctp_window_equal=%d sctp_window_unknown=%d sctp_cwnd_kib_min=%.1f sctp_cwnd_kib_p50=%.1f sctp_cwnd_kib_p95=%.1f sctp_rwnd_kib_p50=%.1f sctp_rwnd_kib_p95=%.1f sctp_srtt_ms_p50=%.1f sctp_srtt_ms_p95=%.1f sctp_srtt_ms_max=%.1f sctp_mtu_b_p50=%d sctp_mtu_b_min=%d sctp_mtu_b_max=%d sctp_meta=%d sctp_interleave=%d sctp_zero_tx=%d sctp_zero_rx=%d sctp_pr_none=%d sctp_pr_fwd=%d sctp_pr_ifwd=%d goroutines=%d heap_mib=%.1f sys_mib=%.1f alloc_mib_s=%.2f mallocs_s=%.0f gc_cycles=%d gc_pause_ms=%.2f gc_cpu_fraction=%.4f",
 			peers, connected, accepted, failed, timedOut, handshakesActive, handshakesRejected,
 			transportStats.activeLanes.Load(), transportStats.admittedRequests.Load(),
 			transportStats.activeHandlers.Load(), transportStats.activeNonInteractiveHandlers.Load(),
 			transportStats.activeBulk.Load(),
 			transportStats.requestRejects.Load(), transportStats.invalidChannels.Load(),
-			float64(intervalBytes*8)/(60*1_000_000), intervalFrames, bodyBytes,
+			float64(intervalBytes*8)/(elapsedSeconds*1_000_000), intervalFrames, bodyBytes,
+			transport.samples, transport.iceUDP, transport.iceTCP, transport.iceUnknown,
+			float64(transport.bytesSent*8)/(elapsedSeconds*1_000_000),
+			float64(transport.bytesReceived*8)/(elapsedSeconds*1_000_000),
+			transport.cwndLimited, transport.rwndLimited,
+			transport.windowEqual, transport.windowUnknown,
+			float64(transport.congestionWindow.min)/1024,
+			float64(transport.congestionWindow.p50)/1024,
+			float64(transport.congestionWindow.p95)/1024,
+			float64(transport.receiverWindow.p50)/1024,
+			float64(transport.receiverWindow.p95)/1024,
+			transport.smoothedRTT.p50*1000,
+			transport.smoothedRTT.p95*1000,
+			transport.smoothedRTT.max*1000,
+			transport.mtu.p50, transport.mtu.min, transport.mtu.max,
+			transport.metadataSamples, transport.messageInterleaving,
+			transport.zeroChecksumSending, transport.zeroChecksumReceiving,
+			transport.partialNone, transport.partialForwardTSN, transport.partialIForwardTSN,
 			runtime.NumGoroutine(),
 			float64(memory.HeapAlloc)/(1024*1024), float64(memory.Sys)/(1024*1024),
+			float64(allocationBytes)/(1024*1024)/elapsedSeconds,
+			float64(mallocs)/elapsedSeconds, gcCycles,
+			float64(gcPauseNanos)/float64(time.Millisecond), memory.GCCPUFraction,
 		)
 	}
 }

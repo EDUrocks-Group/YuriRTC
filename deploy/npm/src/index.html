@@ -5,25 +5,28 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#8f1558">
   <meta name="color-scheme" content="dark">
+  <link rel="stylesheet" href="__YURIRTC_ICON_STYLESHEET__">
   <title>yrneazngurqh</title>
   <style>html,body{height:100%;margin:0;background:#151216}</style>
 </head>
 <body>
 <script type="module">
-const loaderVersion = "__YURIRTC_LOADER_VERSION__";
+import {
+  continueUnverified,
+  fontUrlsFor,
+  importClientBytes,
+  LoaderResolutionError,
+  resolveLoader
+} from "./integrity-loader.mjs";
+
 const config = __YURIRTC_CONFIG__;
 const names = __YURIRTC_TOKENS__;
-const loaderPackage = "@edurocks-group/loader";
-// jsdelivr serves @latest directly (200); unpkg 302-redirects. Prefer the
-// direct source to avoid a redirect round trip on every load.
-const loaderSources = [
-  `https://cdn.jsdelivr.net/npm/${loaderPackage}@${loaderVersion}/dist/bundle/client.js`,
-  `https://unpkg.com/${loaderPackage}@${loaderVersion}/dist/bundle/client.js`
-];
-const fontSources = [
-  `https://cdn.jsdelivr.net/npm/${loaderPackage}@${loaderVersion}/dist/assets/rot13.woff`,
-  `https://unpkg.com/${loaderPackage}@${loaderVersion}/dist/assets/rot13.woff`
-];
+const manifestPublicKey = __YURIRTC_MANIFEST_PUBLIC_KEY__;
+const testAssetBase = __YURIRTC_TEST_ASSET_BASE__;
+const bundledLoader = __YURIRTC_BUNDLED_LOADER__;
+if (testAssetBase === "/yurirtc-e2e") {
+  document.documentElement.dataset.yurirtcTestManifestPublicKey = manifestPublicKey;
+}
 
 const copy = {
   pageTitle: "yrneazngurqh",
@@ -47,7 +50,15 @@ const copy = {
   tryingNow: "Erpbaarpgvat…",
   unavailableTitle: "Ab argjbex ebhgr ninvynoyr",
   unavailableBody: "LhevEGP pbhyq abg pbaarpg bire HQC be GPC. Purpx lbhe argjbex, gura gel ntnva.",
-  tryAgain: "Gel ntnva"
+  tryAgain: "Gel ntnva",
+  integrityTitle: "Ybnqre vagrtevgl pbhyq abg or irevsvrq.",
+  integrityBody: "Vs lbh ner ba n znantrq qrivpr guvf pbhyq or gur erfhyg bs n ZvGZ erjevgvat nggnpx ba lbhe argjbex erdhrfgf be gur erfhyg bs na nqoybpxre be bgure rkgrafvba. Vs guvf vf lbhe bja crefbany qrivpr guvf zvtug or gur erfhyg bs na nqoybpxre be fbzrguvat ba lbhe qrivpr erjevgvat argjbex erdhrfgf.",
+  integrityArticle: "Yrnea nobhg zna-va-gur-zvqqyr nggnpxf",
+  continue: "Pbagvahr",
+  close: "Pybfr",
+  unavailableLoaderTitle: "Ybnqre haninvynoyr",
+  unavailableLoaderBody: "Ybnqre pbqr ivn PQA oybpxre be abg ninvynoyr, cyrnfr rznvy nyyunaqf@rqhebpxf.bet sbe shegure uryc",
+  retryLoader: "Ergel"
 };
 
 const rot13 = (value) => String(value ?? "").replace(/[A-Za-z]/g, (character) => {
@@ -58,9 +69,8 @@ const rot13 = (value) => String(value ?? "").replace(/[A-Za-z]/g, (character) =>
 document.title = rot13(copy.pageTitle);
 const style = document.createElement("style");
 style.textContent = `
-@font-face{font-family:'YuriRTCDisplay';src:url('${fontSources[0]}') format('woff'),url('${fontSources[1]}') format('woff');font-style:normal;font-weight:100 900;font-display:block}
 :root{color-scheme:dark;--primary:#ffafd0;--on-primary:#5e113b;--primary-container:#7a294f;--on-primary-container:#ffd8e8;--secondary:#e5bdc7;--on-secondary:#432932;--secondary-container:#5c3f47;--on-secondary-container:#ffd9e2;--tertiary:#efbd94;--surface:#151216;--surface-low:#1d191d;--surface-high:#2b252a;--surface-highest:#363036;--on-surface:#eee0e4;--on-surface-variant:#d7c2c8;--outline:#9f8c92;--outline-variant:#514348;--error:#ffb4ab;--on-error:#690005;--error-container:#93000a;--on-error-container:#ffdad6;--level-green:#76dc91;--level-yellow:#ebc248;--level-red:#ff9b91;--level-deep-red:#e05d58}
-html,body{height:100%;margin:0;overflow:hidden;background:var(--surface);color:var(--on-surface);font-family:'YuriRTCDisplay';font-size:15px;font-weight:400;line-height:1.55;font-synthesis:none;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased}
+html,body{height:100%;margin:0;overflow:hidden;background:var(--surface);color:var(--on-surface);font-family:'${names.font}';font-size:15px;font-weight:400;line-height:1.55;font-synthesis:none;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased}
 *,*::before,*::after{box-sizing:border-box;font-family:inherit}
 #${names.app}{position:fixed;inset:0}
 #${names.boot}{position:fixed;inset:0;z-index:3;display:grid;place-items:center;padding:88px 24px 24px;background:var(--surface);opacity:1;transition:opacity .25s ease}
@@ -73,31 +83,37 @@ html,body{height:100%;margin:0;overflow:hidden;background:var(--surface);color:v
    boxes -- they are still queried, and they are re-shown on a disconnect. */
 #${names.boot}.${names.done} .${names.spinner}{animation:none}
 #${names.network}.${names.done}{opacity:0;pointer-events:none;backdrop-filter:none;-webkit-backdrop-filter:none}
-.${names.card}{width:min(480px,100%);padding:32px 28px;text-align:center;border:1px solid var(--outline-variant);border-radius:28px;background:var(--surface-high);box-shadow:0 8px 22px rgba(0,0,0,.28)}
+.${names.card}{width:min(520px,100%);padding:32px 28px;text-align:center;border:1px solid var(--outline-variant);border-radius:28px;background:var(--surface-high)}
 .${names.spinner}{width:28px;height:28px;margin:0 auto 20px;border:3px solid var(--surface-highest);border-top-color:var(--primary);border-radius:50%;animation:${names.spin} .8s linear infinite}
 @keyframes ${names.spin}{to{transform:rotate(360deg)}}
 .${names.brand}{margin:0 0 6px;color:var(--on-surface);font-size:18px;font-weight:850;letter-spacing:-.03em}
 .${names.phase}{color:var(--on-surface-variant);font-size:14px;font-weight:700}
 .${names.hint}{min-height:19px;margin-top:9px;color:var(--outline);font-size:12px}
-#${names.network}{position:fixed;z-index:5;top:max(12px,env(safe-area-inset-top));left:50%;width:min(460px,calc(100% - 24px));transform:translateX(-50%);display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:14px;row-gap:7px;align-items:center;padding:10px 14px;border:1px solid color-mix(in srgb,var(--outline-variant) 82%,transparent);border-radius:22px;background:color-mix(in srgb,var(--surface-high) 94%,transparent);box-shadow:0 3px 14px rgba(0,0,0,.24);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);opacity:1;transition:opacity .25s ease}
+#${names.network}{position:fixed;z-index:5;top:max(12px,env(safe-area-inset-top));left:50%;width:min(460px,calc(100% - 24px));transform:translateX(-50%);display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:14px;row-gap:7px;align-items:center;padding:10px 14px;border:1px solid color-mix(in srgb,var(--outline-variant) 82%,transparent);border-radius:22px;background:color-mix(in srgb,var(--surface-high) 94%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);opacity:1;transition:opacity .25s ease}
 .${names.networkLabel}{min-width:0;color:var(--on-surface);font-size:12px;font-weight:750;letter-spacing:.01em;white-space:nowrap}
 .${names.networkValue}{max-width:210px;overflow:hidden;color:var(--on-surface-variant);font-size:11px;font-weight:650;text-align:right;text-overflow:ellipsis;white-space:nowrap}
 .${names.networkTrack}{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:4px;height:8px;padding:1px;border-radius:999px;background:var(--surface-highest)}
-.${names.networkSegment}{min-width:0;border-radius:999px;opacity:.22;transform:scaleY(.72);transition:opacity .2s ease,transform .2s ease,box-shadow .2s ease}
+.${names.networkSegment}{min-width:0;border-radius:999px;opacity:.22;transform:scaleY(.72);transition:opacity .2s ease,transform .2s ease}
 .${names.networkSegment}[data-yurirtc-level-segment="udp-standard"]{background:var(--level-green)}
 .${names.networkSegment}[data-yurirtc-level-segment="udp-443"]{background:var(--level-yellow)}
 .${names.networkSegment}[data-yurirtc-level-segment="tcp-standard"]{background:var(--level-red)}
 .${names.networkSegment}[data-yurirtc-level-segment="tcp-443"]{background:var(--level-deep-red)}
 #${names.network}[data-yurirtc-network-state="testing"] .${names.networkSegment}{background:var(--outline);opacity:.28}
-#${names.network}[data-yurirtc-network-tier="udp-standard"] .${names.networkSegment}[data-yurirtc-level-segment="udp-standard"],#${names.network}[data-yurirtc-network-tier="udp-443"] .${names.networkSegment}[data-yurirtc-level-segment="udp-443"],#${names.network}[data-yurirtc-network-tier="tcp-standard"] .${names.networkSegment}[data-yurirtc-level-segment="tcp-standard"],#${names.network}[data-yurirtc-network-tier="tcp-443"] .${names.networkSegment}[data-yurirtc-level-segment="tcp-443"]{opacity:1;transform:scaleY(1);box-shadow:0 0 0 1px color-mix(in srgb,var(--on-surface) 72%,transparent)}
-.${names.screenIcon}{display:grid;place-items:center;width:48px;height:48px;margin:0 auto 18px;border-radius:16px;background:var(--error-container);color:var(--on-error-container);font-size:25px;font-weight:850;line-height:1}
+#${names.network}[data-yurirtc-network-tier="udp-standard"] .${names.networkSegment}[data-yurirtc-level-segment="udp-standard"],#${names.network}[data-yurirtc-network-tier="udp-443"] .${names.networkSegment}[data-yurirtc-level-segment="udp-443"],#${names.network}[data-yurirtc-network-tier="tcp-standard"] .${names.networkSegment}[data-yurirtc-level-segment="tcp-standard"],#${names.network}[data-yurirtc-network-tier="tcp-443"] .${names.networkSegment}[data-yurirtc-level-segment="tcp-443"]{opacity:1;transform:scaleY(1)}
+.${names.screenIcon}{display:grid;place-items:center;width:48px;height:48px;margin:0 auto 18px;border-radius:16px;background:var(--error-container);color:var(--on-error-container);font:400 28px/1 'Material Symbols Rounded';font-variation-settings:'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 28}
 .${names.screenTitle}{margin:0;color:var(--on-surface);font-size:22px;font-weight:750;letter-spacing:-.02em}
-.${names.screenBody}{max-width:380px;margin:10px auto 0;color:var(--on-surface-variant);font-size:14px}
+.${names.screenBody}{max-width:440px;margin:10px auto 0;color:var(--on-surface-variant);font-size:14px}
 .${names.retryStatus}{min-height:21px;margin:16px 0 0;color:var(--primary);font-size:13px;font-weight:700}
-.${names.action}{min-height:40px;margin-top:20px;padding:9px 22px;border:0;border-radius:999px;background:var(--primary);color:var(--on-primary);font-size:14px;font-weight:750;cursor:pointer;transition:box-shadow .15s ease,filter .15s ease}
-.${names.action}:hover{box-shadow:0 2px 7px rgba(0,0,0,.32);filter:brightness(1.04)}
+.${names.actions}{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin-top:22px}
+.${names.action}{min-height:40px;margin:0;padding:9px 22px;border:0;border-radius:999px;background:var(--primary);color:var(--on-primary);font-size:14px;font-weight:750;cursor:pointer;transition:filter .15s ease}
+.${names.action}:hover{filter:brightness(1.04)}
 .${names.action}:focus-visible{outline:3px solid var(--on-primary-container);outline-offset:3px}
-.${names.action}:active{box-shadow:none;filter:brightness(.94)}
+.${names.action}:active{filter:brightness(.94)}
+.${names.action}:disabled{cursor:wait;filter:saturate(.25);opacity:.62}
+.${names.secondaryAction}{border:1px solid var(--outline);background:transparent;color:var(--on-surface)}
+.${names.loaderLink}{display:inline-block;margin-top:14px;color:var(--primary);font-size:13px;font-weight:700;text-underline-offset:3px}
+.${names.plain},.${names.plain} *:not(.${names.screenIcon}){font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif!important}
+body:not([data-yurirtc-font-ready]) .${names.plain} :is(.${names.screenTitle},.${names.screenBody},.${names.action},.${names.loaderLink}){color:revert!important}
 body:not([data-yurirtc-font-ready]) :is(.${names.brand},.${names.phase},.${names.hint},.${names.networkLabel},.${names.networkValue},.${names.screenIcon},.${names.screenTitle},.${names.screenBody},.${names.retryStatus},.${names.action}){color:transparent!important;text-shadow:none!important}
 @media(max-width:520px){#${names.network}{grid-template-columns:1fr;padding:9px 12px;row-gap:5px}.${names.networkValue}{max-width:none;text-align:left}#${names.boot}{padding-top:112px}.${names.card}{padding:28px 22px}}
 @media(prefers-reduced-motion:reduce){#${names.boot},#${names.network},.${names.networkSegment},.${names.action}{transition:none}.${names.spinner}{animation-duration:1.8s}}
@@ -156,6 +172,7 @@ function setNetworkIndicator(state, tier = "", value = copy.networkTesting) {
 
 function renderPending() {
   clearInterval(retryTimer);
+  bootLayer.classList.remove(names.plain);
   bootLayer.classList.remove(names.done);
   network.classList.remove(names.done);
   bootLayer.setAttribute("role", "status");
@@ -176,32 +193,34 @@ function reconnect(reason) {
 }
 
 function actionButton(label) {
-  return `<button type="button" class="${names.action}" data-yurirtc-reconnect aria-label="${rot13(label)}">${label}</button>`;
+  return `<div class="${names.actions}"><button type="button" class="${names.action}" data-yurirtc-reconnect aria-label="${rot13(label)}">${label}</button></div>`;
 }
 
 function renderUnavailable() {
   networkConnected = false;
   clearInterval(retryTimer);
+  bootLayer.classList.remove(names.plain);
   setNetworkIndicator("unavailable", "", copy.unavailable);
   bootLayer.classList.remove(names.done);
   network.classList.remove(names.done);
   bootLayer.dataset.yurirtcView = "unavailable";
   bootLayer.setAttribute("role", "alert");
   bootLayer.setAttribute("aria-label", `${rot13(copy.unavailableTitle)}. ${rot13(copy.unavailableBody)}`);
-  bootLayer.innerHTML = `<div class="${names.card}"><div class="${names.screenIcon}" aria-hidden="true">!</div><h1 class="${names.screenTitle}">${copy.unavailableTitle}</h1><p class="${names.screenBody}">${copy.unavailableBody}</p>${actionButton(copy.tryAgain)}</div>`;
+  bootLayer.innerHTML = `<div class="${names.card}"><div class="${names.screenIcon}" aria-hidden="true">warning</div><h1 class="${names.screenTitle}">${copy.unavailableTitle}</h1><p class="${names.screenBody}">${copy.unavailableBody}</p>${actionButton(copy.tryAgain)}</div>`;
   bootLayer.querySelector("[data-yurirtc-reconnect]").addEventListener("click", () => reconnect("manual"));
 }
 
 function renderDisconnected(attempt, retryInMs) {
   networkConnected = false;
   clearInterval(retryTimer);
+  bootLayer.classList.remove(names.plain);
   setNetworkIndicator("disconnected", lastTier, copy.interrupted);
   bootLayer.classList.remove(names.done);
   network.classList.remove(names.done);
   bootLayer.dataset.yurirtcView = "disconnected";
   bootLayer.setAttribute("role", "alert");
   bootLayer.setAttribute("aria-label", `${rot13(copy.disconnectedTitle)}. ${rot13(copy.disconnectedBody)}`);
-  bootLayer.innerHTML = `<div class="${names.card}"><div class="${names.screenIcon}" aria-hidden="true">!</div><h1 class="${names.screenTitle}">${copy.disconnectedTitle}</h1><p class="${names.screenBody}">${copy.disconnectedBody}</p><p class="${names.retryStatus}" data-yurirtc-retry-status></p>${actionButton(copy.reconnectNow)}</div>`;
+  bootLayer.innerHTML = `<div class="${names.card}"><div class="${names.screenIcon}" aria-hidden="true">warning</div><h1 class="${names.screenTitle}">${copy.disconnectedTitle}</h1><p class="${names.screenBody}">${copy.disconnectedBody}</p><p class="${names.retryStatus}" data-yurirtc-retry-status></p>${actionButton(copy.reconnectNow)}</div>`;
   const retry = bootLayer.querySelector("[data-yurirtc-retry-status]");
   const started = performance.now();
   const updateRetry = () => {
@@ -265,34 +284,165 @@ function acceptNetworkState(detail) {
 
 window.addEventListener(NETWORK_EVENT, (event) => acceptNetworkState(event.detail));
 
-void document.fonts.load("400 1rem 'YuriRTCDisplay'").then((faces) => {
-  if (faces.length > 0) document.body.dataset.yurirtcFontReady = "true";
-}).catch(() => undefined);
+function installLoaderFont(descriptor) {
+  if (!bundledLoader) {
+    const sources = (testAssetBase
+      ? [`${testAssetBase}/rot13.woff`]
+      : fontUrlsFor(descriptor))
+      .map((url) => `url('${url}') format('woff')`)
+      .join(",");
+    const fontStyle = document.createElement("style");
+    fontStyle.textContent = `@font-face{font-family:'${names.font}';src:${sources};font-style:normal;font-weight:100 900;font-display:block}`;
+    document.head.append(fontStyle);
+  }
+  void document.fonts.load(`400 1rem '${names.font}'`).then((faces) => {
+    if (faces.length > 0) document.body.dataset.yurirtcFontReady = "true";
+  }).catch(() => undefined);
+}
+
+async function bundledClientBytes(descriptor) {
+  const payload = document.getElementById(descriptor?.clientElementId);
+  const encoded = payload?.textContent ?? "";
+  payload?.remove();
+  if (
+    !encoded || encoded.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)
+  ) {
+    throw new LoaderResolutionError("integrity-failure", {
+      descriptor,
+      reason: "loader-encoding"
+    });
+  }
+  let bytes;
+  try {
+    const binary = atob(encoded);
+    bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+  } catch {
+    throw new LoaderResolutionError("integrity-failure", {
+      descriptor,
+      reason: "loader-encoding"
+    });
+  }
+  let digest;
+  try {
+    const hashed = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    digest = btoa(String.fromCharCode(...hashed))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+  } catch {
+    throw new LoaderResolutionError("integrity-failure", {
+      descriptor,
+      bytes,
+      reason: "crypto-unavailable"
+    });
+  }
+  if (digest !== descriptor.sha256) {
+    throw new LoaderResolutionError("integrity-failure", {
+      descriptor,
+      bytes,
+      reason: "loader-hash"
+    });
+  }
+  return bytes;
+}
+
+function closeCarrier() {
+  window.close();
+  setTimeout(() => {
+    document.body.replaceChildren();
+    document.documentElement.style.background = "#151216";
+    try { location.replace("about:blank"); } catch {}
+  }, 120);
+}
+
+function prepareLoaderError(kind) {
+  clearInterval(retryTimer);
+  networkConnected = false;
+  network.classList.add(names.done);
+  bootLayer.classList.remove(names.done);
+  bootLayer.classList.add(names.plain);
+  bootLayer.dataset.yurirtcView = "loader-error";
+  bootLayer.dataset.yurirtcLoaderError = kind;
+  bootLayer.setAttribute("role", "alertdialog");
+  bootLayer.setAttribute("aria-modal", "true");
+}
+
+function renderLoaderUnavailable() {
+  prepareLoaderError("cdn-unavailable");
+  const title = rot13(copy.unavailableLoaderTitle);
+  const body = rot13(copy.unavailableLoaderBody);
+  bootLayer.setAttribute("aria-label", `${title}. ${body}`);
+  bootLayer.innerHTML = `<div class="${names.card}"><div class="${names.screenIcon}" aria-hidden="true">cloud_off</div><h1 class="${names.screenTitle}">${title}</h1><p class="${names.screenBody}">${body}</p><div class="${names.actions}"><button type="button" class="${names.action}" data-yurirtc-loader-retry>${rot13(copy.retryLoader)}</button><button type="button" class="${names.action} ${names.secondaryAction}" data-yurirtc-loader-close>${rot13(copy.close)}</button></div></div>`;
+  bootLayer.querySelector("[data-yurirtc-loader-retry]").addEventListener("click", () => location.reload());
+  bootLayer.querySelector("[data-yurirtc-loader-close]").addEventListener("click", closeCarrier);
+}
+
+function renderIntegrityWarning(error) {
+  prepareLoaderError("integrity");
+  bootLayer.dataset.yurirtcLoaderIntegrityStage = error?.bytes
+    ? "loader-hash"
+    : "manifest-signature";
+  bootLayer.dataset.yurirtcLoaderIntegrityReason = error?.reason ?? "unknown";
+  if (error?.manifestFingerprint) {
+    bootLayer.dataset.yurirtcLoaderManifestFingerprint = error.manifestFingerprint;
+  }
+  const title = rot13(copy.integrityTitle);
+  const body = rot13(copy.integrityBody);
+  bootLayer.setAttribute("aria-label", `${title} ${body}`);
+  bootLayer.innerHTML = `<div class="${names.card}"><div class="${names.screenIcon}" aria-hidden="true">gpp_maybe</div><h1 class="${names.screenTitle}">${title}</h1><p class="${names.screenBody}">${body}</p><a class="${names.loaderLink}" href="https://www.fortinet.com/resources/cyberglossary/man-in-the-middle-attack" target="_blank" rel="noopener noreferrer">${rot13(copy.integrityArticle)}</a><div class="${names.actions}"><button type="button" class="${names.action}" data-yurirtc-loader-continue disabled></button><button type="button" class="${names.action} ${names.secondaryAction}" data-yurirtc-loader-close>${rot13(copy.close)}</button></div></div>`;
+  const continueButton = bootLayer.querySelector("[data-yurirtc-loader-continue]");
+  const deadline = performance.now() + 3000;
+  const updateCountdown = () => {
+    const seconds = Math.max(0, Math.ceil((deadline - performance.now()) / 1000));
+    continueButton.textContent = seconds > 0 ? `${rot13(copy.continue)} (${seconds}s)` : rot13(copy.continue);
+    if (seconds === 0) {
+      continueButton.disabled = false;
+      clearInterval(retryTimer);
+    }
+  };
+  updateCountdown();
+  retryTimer = setInterval(updateCountdown, 100);
+  continueButton.addEventListener("click", async () => {
+    continueButton.disabled = true;
+    try {
+      const bytes = await continueUnverified(error);
+      const client = await importClientBytes(bytes);
+      if (error.descriptor) installLoaderFont(error.descriptor);
+      await startClient(client, error.descriptor);
+    } catch {
+      renderLoaderUnavailable();
+    }
+  });
+  bootLayer.querySelector("[data-yurirtc-loader-close]").addEventListener("click", closeCarrier);
+}
 
 function fail(error) {
   void error;
+  console.warn(rot13("[LhevEGP] genafcbeg fgneghc snvyrq"));
   renderUnavailable();
 }
 
-async function importFirst(urls) {
-  for (const url of urls) {
-    try {
-      return await import(url);
-    } catch {}
-  }
-  throw new Error("no client source reachable");
-}
-
-try {
-  if (!window.isSecureContext) throw new Error("a secure HTTPS context is required");
-  if (!("serviceWorker" in navigator)) throw new Error("service workers are unavailable");
-
-  phase(copy.loading);
-  const { boot } = await importFirst(loaderSources);
+async function startClient(client, descriptor) {
+  const { boot } = client;
+  if (typeof boot !== "function") throw new Error("loader client has no boot export");
+  if (!descriptor?.version) throw new Error("loader client has no pinned worker version");
+  renderPending();
   phase(copy.connecting);
+  const recovery = bundledLoader
+    ? {
+        recovery: {
+          clientUrls: [new URL(descriptor.clientPath, location.href).href]
+        }
+      }
+    : {};
   await boot({
     ...config,
-    swUrl: "sw.js",
+    ...recovery,
+    swUrl: `sw.js?yurirtc-loader=${encodeURIComponent(descriptor.version)}`,
     mount: app,
     appPath: "/",
     onDiagnostics: (diagnostics) => {
@@ -312,8 +462,39 @@ try {
   };
   frame?.addEventListener("load", revealApp, { once: true });
   setTimeout(revealApp, 8000);
+}
+
+try {
+  if (!window.isSecureContext) throw new Error("a secure HTTPS context is required");
+  if (!("serviceWorker" in navigator)) throw new Error("service workers are unavailable");
+  phase(copy.loading);
+  const resolved = bundledLoader
+    ? {
+        descriptor: bundledLoader,
+        bytes: await bundledClientBytes(bundledLoader)
+      }
+    : await resolveLoader({
+        publicKeySpki: manifestPublicKey,
+        pointerUrls: testAssetBase ? [`${testAssetBase}/loader.json`] : undefined,
+        fetchImpl: testAssetBase
+          ? (url, init) => fetch(
+              String(url).endsWith("/dist/bundle/client.js")
+                ? `${testAssetBase}/client.js`
+                : url,
+              init
+            )
+          : undefined
+      });
+  installLoaderFont(resolved.descriptor);
+  await startClient(await importClientBytes(resolved.bytes), resolved.descriptor);
 } catch (error) {
-  fail(error);
+  if (error instanceof LoaderResolutionError && error.code === "integrity-failure") {
+    renderIntegrityWarning(error);
+  } else if (error instanceof LoaderResolutionError && error.code === "cdn-unavailable") {
+    renderLoaderUnavailable();
+  } else {
+    fail(error);
+  }
 }
 </script>
 </body>

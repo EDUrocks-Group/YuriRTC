@@ -6,16 +6,71 @@ import { pathToFileURL } from "node:url";
 import vm from "node:vm";
 
 const HERE = import.meta.dirname;
-const expected = new Set([
-  "README.md",
-  "package.json",
+const ROOT = resolve(HERE, "../..");
+const expectedDeclaredFiles = [
+  "DISCLOSURE",
+  "LICENSE",
   "dist/bundle/client.js",
   "dist/bundle/sw.js",
   "dist/bundle/sw-stub.js",
   "dist/types/index.d.ts",
   "dist/assets/rot13.woff",
   "dist/assets/OFL.txt"
+];
+const expected = new Set([
+  "README.md",
+  "package.json",
+  ...expectedDeclaredFiles
 ]);
+
+const packageMetadata = JSON.parse(await readFile(resolve(HERE, "package.json"), "utf8"));
+if (packageMetadata.license !== "AGPL-3.0-only") {
+  throw new Error("loader package must declare AGPL-3.0-only");
+}
+if (JSON.stringify(packageMetadata.contentPolicy) !== JSON.stringify({ class: "dual-use" })) {
+  throw new Error("loader package must declare npm dual-use content metadata");
+}
+const expectedRepository = {
+  type: "git",
+  url: "git+https://github.com/EDUrocks-Group/YuriRTC.git",
+  directory: "packages/loader"
+};
+if (JSON.stringify(packageMetadata.repository) !== JSON.stringify(expectedRepository)) {
+  throw new Error("loader package repository metadata is missing or incorrect");
+}
+if (
+  packageMetadata.homepage !== "https://github.com/EDUrocks-Group/YuriRTC#readme" ||
+  packageMetadata.bugs?.url !== "https://github.com/EDUrocks-Group/YuriRTC/issues"
+) {
+  throw new Error("loader package homepage or issue tracker metadata is missing or incorrect");
+}
+if (
+  JSON.stringify([...packageMetadata.files].sort()) !==
+  JSON.stringify([...expectedDeclaredFiles].sort())
+) {
+  throw new Error("loader package files allowlist is missing required compliance artifacts");
+}
+
+const [packageLicense, repositoryLicense, disclosure] = await Promise.all([
+  readFile(resolve(HERE, "LICENSE")),
+  readFile(resolve(ROOT, "LICENSE")),
+  readFile(resolve(HERE, "DISCLOSURE"), "utf8")
+]);
+if (!packageLicense.equals(repositoryLicense)) {
+  throw new Error("loader LICENSE must exactly match the repository AGPL license");
+}
+const normalizedDisclosure = disclosure.toLowerCase();
+for (const required of [
+  "dual-use",
+  "webrtc",
+  "service worker",
+  "authorized",
+  "https://github.com/edurocks-group/yurirtc"
+]) {
+  if (!normalizedDisclosure.includes(required)) {
+    throw new Error(`loader DISCLOSURE is missing required context: ${required}`);
+  }
+}
 
 const packed = spawnSync(
   "npm",
@@ -47,7 +102,16 @@ if (client.LoaderClient !== client.YuriRTCClient) {
 }
 
 const declarations = await readFile(resolve(HERE, "dist/types/index.d.ts"), "utf8");
-for (const name of ["YuriRTCConfig", "LoaderConfig", "YuriRTCClient", "LoaderClient"]) {
+for (const name of [
+  "YuriRTCConfig",
+  "LoaderConfig",
+  "clientUrls",
+  "GoodputMonitorOptions",
+  "ConnectionOptions",
+  "YuriRTCClient",
+  "LoaderClient",
+  "onAdaptiveTcpSuggested"
+]) {
   if (!declarations.includes(name)) throw new Error(`public declarations lost ${name}`);
 }
 

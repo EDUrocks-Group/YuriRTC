@@ -16,6 +16,7 @@ export type CachePolicy =
   | "cache-first-immutable"
   | "stale-while-revalidate"
   | "cache-first-lru"
+  | "revalidate-lru"
   | "never";
 
 export interface Classification {
@@ -31,7 +32,10 @@ const POLICY: Record<RequestClass, CachePolicy> = {
   cover: "cache-first-lru",
   payload: "never",
   api: "never",
-  other: "never"
+  // A content node serves every non-API path from a static tree. Unknown
+  // assets are therefore reusable, but not assumed immutable: their HTTP
+  // validators are checked before reuse and storage remains quota-bounded.
+  other: "revalidate-lru"
 };
 
 /** `pathname` must be origin-relative and already normalised. */
@@ -42,7 +46,7 @@ export function classify(pathname: string): Classification {
 }
 
 function classifyKind(pathname: string): RequestClass {
-  if (pathname.startsWith("/apiv2/")) return "api";
+  if (pathname === "/apiv2" || pathname.startsWith("/apiv2/")) return "api";
 
   // Content-hashed build output. Immutable by construction.
   if (pathname.startsWith("/a/")) return "shell";
@@ -60,7 +64,9 @@ function classifyKind(pathname: string): RequestClass {
   }
 
   if (pathname === "/" || pathname.endsWith(".html")) return "route";
-  if (pathname === "/favicon.ico" || pathname.startsWith("/icons/")) return "shell";
+  // These names are conventional, not content hashes. Treat them as ordinary
+  // validator-backed files so arbitrary hosted sites may replace them.
+  if (pathname === "/favicon.ico" || pathname.startsWith("/icons/")) return "other";
   if (pathname.endsWith(".webmanifest") || pathname === "/manifest.json") return "route";
 
   return "other";
@@ -101,10 +107,26 @@ const CRITICAL_EXTENSIONS = new Set([
   ".js",
   ".json",
   ".mjs",
-  ".wasm",
   ".woff",
   ".woff2"
 ]);
+
+/** Large/streamable formats should not occupy the small critical-file lane. */
+const INCREMENTAL_EXTENSIONS = new Set([
+  ".br",
+  ".bundle",
+  ".data",
+  ".gz",
+  ".pak",
+  ".wasm",
+  ".zip"
+]);
+
+export function isIncrementalAsset(logicalPath: string): boolean {
+  const leaf = logicalPath.toLowerCase().split(/[?#]/, 1)[0] ?? "";
+  const dot = leaf.lastIndexOf(".");
+  return dot >= 0 && INCREMENTAL_EXTENSIONS.has(leaf.slice(dot));
+}
 
 /**
  * Maps Fetch metadata to the node's v3 scheduler. This keeps chat/navigation
@@ -151,6 +173,7 @@ export function requestPriority(request: {
     destination === "audio" ||
     destination === "video" ||
     destination === "track" ||
+    isIncrementalAsset(request.logicalPath) ||
     classify(request.logicalPath).kind === "payload"
   ) {
     return RequestPriority.Bulk;

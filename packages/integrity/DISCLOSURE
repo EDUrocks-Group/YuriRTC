@@ -1,0 +1,19 @@
+YuriRTC signed-pointer dual-use disclosure
+
+This package contains a signed manifest that identifies an immutable release of
+the @advwebrec/grainloading YuriRTC browser transport and its SHA-256 digest. It
+is a release-integrity control plane for that dual-use loader. The package does
+not contain the private signing key or execute installation scripts.
+
+The referenced loader transports a site operator's hosted web content over
+WebRTC and uses a service worker to reconstruct same-origin responses. It is
+intended only for legitimate, authorized hosting and access to content. It must
+not be used to bypass access controls, monitoring, organizational policy, or
+network restrictions without the authorization of the affected users and system
+or network owners.
+
+Readable source, build instructions, tests, and deployment documentation are
+available at https://github.com/EDUrocks-Group/YuriRTC.
+
+Security and abuse reports may be filed privately with allhands@edurocks.org or
+through https://github.com/EDUrocks-Group/YuriRTC/issues.

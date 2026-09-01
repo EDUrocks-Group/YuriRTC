@@ -3,7 +3,11 @@
  * and calls `boot()`.
  */
 
-import { YuriRTCClient, type ConnectionDiagnostics } from "./client.js";
+import {
+  YuriRTCClient,
+  type ConnectionDiagnostics,
+  type ConnectionOptions
+} from "./client.js";
 import { resolveConfig, type YuriRTCConfig } from "./config.js";
 import {
   appPathWithinScope,
@@ -14,6 +18,13 @@ import {
 } from "./scope.js";
 import { appPathFromShellLocation } from "./shell.js";
 import { retryDelayMs } from "./retry.js";
+import {
+  clearRoutePreference,
+  readRoutePreference,
+  rememberRoutePreference,
+  rememberTcpPreference
+} from "./adaptive-transport.js";
+import { raceInitialRoutes } from "./route-race.js";
 
 export { YuriRTCClient, YuriRTCClient as LoaderClient } from "./client.js";
 export { CarriedWebSocket } from "./websocket.js";
@@ -26,7 +37,8 @@ export { CarriedWebSocket } from "./websocket.js";
  * enumeration nor replaceable by page script.
  */
 export const YURIRTC_SOCKET_OPENER = "__yuriRTCOpenWebSocket";
-export type { ConnectionDiagnostics } from "./client.js";
+export type { ConnectionDiagnostics, ConnectionOptions } from "./client.js";
+export type { GoodputMonitorOptions } from "./adaptive-transport.js";
 export type { YuriRTCConfig, LoaderConfig } from "./config.js";
 export { classify, classifyRequest } from "./routing.js";
 export type { Classification, RequestClass, CachePolicy } from "./routing.js";
@@ -119,9 +131,8 @@ export async function boot(options: BootOptions): Promise<YuriRTCClient> {
   // CDN — a module worker rejects top-level await ("ServiceWorker cannot be
   // started") and cannot make a static import conditional.
   //
-  // updateViaCache "none": the stub imports the @latest worker bundle, and only
-  // this mode makes an update check re-fetch those imports, so publishing a new
-  // loader version reaches already-installed carriers without a re-upload.
+  // updateViaCache "none" makes update checks revalidate the same-origin stub
+  // and its immutable, version-pinned imported worker bundle.
   let registration: ServiceWorkerRegistration;
   try {
     registration = await navigator.serviceWorker.register(swUrl, {
@@ -167,7 +178,8 @@ export async function boot(options: BootOptions): Promise<YuriRTCClient> {
 
   // Only this page is the permanent shell. YuriRTCClients injected into app
   // documents deliberately do not get to replace its canonical recovery path.
-  const client = new YuriRTCClient(config, location.pathname);
+  let client = new YuriRTCClient(config, location.pathname);
+  let activeClient = client;
 
   /**
    * The one capability the framed app is handed directly.
@@ -195,12 +207,12 @@ export async function boot(options: BootOptions): Promise<YuriRTCClient> {
       try {
         target = new URL(url, location.href);
       } catch {
-        return client.openWebSocket(url, protocols);
+        return activeClient.openWebSocket(url, protocols);
       }
       const logical = logicalPathForScope(target.pathname, scopePath);
       const mapped = logical === null ? url : `${logical}${target.search}`;
 
-      return client.openWebSocket(mapped, protocols);
+      return activeClient.openWebSocket(mapped, protocols);
     },
     writable: false,
     configurable: false,
@@ -214,6 +226,31 @@ export async function boot(options: BootOptions): Promise<YuriRTCClient> {
   let everConnected = false;
   let initialAttemptFailed = false;
   let connectPromise: Promise<ConnectionDiagnostics> | null = null;
+  let routeStorage: Storage | undefined;
+  try {
+    routeStorage = globalThis.sessionStorage;
+  } catch {
+    /* private/hardened contexts may reject even reading the Storage property */
+  }
+  const routePreferenceKey = `yurirtc:route:${config.firebase.projectId}`;
+  const rememberedRoute = readRoutePreference(routeStorage, routePreferenceKey);
+  let preferredTransport: NonNullable<ConnectionOptions["transport"]> =
+    rememberedRoute ?? "auto";
+  let initialRouteRaceNeeded = rememberedRoute === null;
+  let adaptiveFallbackAttempted = false;
+  let adaptiveFallbackPending = false;
+  let adaptiveReplacement: Promise<void> | null = null;
+  let routeNetworkEpoch = 0;
+  const observedClients = new WeakSet<YuriRTCClient>();
+
+  const resetRouteStateForNetworkChange = (clearPending: boolean): void => {
+    routeNetworkEpoch += 1;
+    preferredTransport = "auto";
+    initialRouteRaceNeeded = true;
+    adaptiveFallbackAttempted = false;
+    if (clearPending) adaptiveFallbackPending = false;
+    clearRoutePreference(routeStorage, routePreferenceKey);
+  };
 
   const ensureMountedFrame = (): HTMLIFrameElement | null => {
     if (mountedFrame || !options.mount) return mountedFrame;
@@ -234,26 +271,74 @@ export async function boot(options: BootOptions): Promise<YuriRTCClient> {
     retryTimer = null;
   };
 
-  const connectTransport = (reconnecting: boolean): Promise<ConnectionDiagnostics> => {
+  const connectTransport = (
+    reconnecting: boolean,
+    reloadApp = reconnecting
+  ): Promise<ConnectionDiagnostics> => {
     if (connectPromise) return connectPromise;
     connecting = true;
+    const requestedTransport = preferredTransport;
     connectPromise = (async () => {
-      if (reconnecting) client.close();
-      const diagnostics = await client.connect(registration);
-      const restored = everConnected;
-      // The original boot() promise has already rejected after an initial
-      // failure, so no outer continuation remains to mount the app. A later
-      // successful Try Again must complete that work itself.
-      if (initialAttemptFailed && !mountedFrame) ensureMountedFrame();
-      options.onDiagnostics?.(diagnostics);
-      dispatchNetworkState({ state: "connected", route: diagnostics.route });
-      retryAttempt = 0;
-      everConnected = true;
-      if (restored && mountedFrame) reloadMountedFrame(mountedFrame, registration.scope);
-      return diagnostics;
+      try {
+        let diagnostics: ConnectionDiagnostics;
+        if (
+          !reconnecting &&
+          !everConnected &&
+          requestedTransport === "auto" &&
+          initialRouteRaceNeeded
+        ) {
+          const tcpCandidate = new YuriRTCClient(config, location.pathname);
+          const selection = await raceInitialRoutes(activeClient, tcpCandidate);
+          client = selection.winner;
+          activeClient = selection.winner;
+          diagnostics = selection.diagnostics;
+          await client.attach(registration);
+          observeClient(client);
+          initialRouteRaceNeeded = false;
+          preferredTransport = selection.transport;
+          rememberRoutePreference(
+            routeStorage,
+            routePreferenceKey,
+            selection.transport
+          );
+        } else {
+          if (reconnecting) activeClient.retireRoute();
+          const delegated = activeClient !== client;
+          diagnostics = await activeClient.connect(delegated ? undefined : registration, {
+            transport: requestedTransport
+          });
+          // The permanent shell owns the sole SW MessagePort. A replacement RTC
+          // route receives requests through that original router, so reconnecting
+          // a delegated route reattaches the shell only after SCTP is open.
+          if (delegated) await client.attach(registration);
+        }
+        const restored = everConnected;
+        // The original boot() promise has already rejected after an initial
+        // failure, so no outer continuation remains to mount the app. A later
+        // successful Try Again must complete that work itself.
+        if (initialAttemptFailed && !mountedFrame) ensureMountedFrame();
+        options.onDiagnostics?.(diagnostics);
+        dispatchNetworkState({ state: "connected", route: diagnostics.route });
+        retryAttempt = 0;
+        everConnected = true;
+        if (restored && reloadApp && mountedFrame) {
+          reloadMountedFrame(mountedFrame, registration.scope);
+        }
+        return diagnostics;
+      } catch (error) {
+        // A network can allow UDP while blocking passive ICE/TCP. Fall back to
+        // normal ICE after one failed forced attempt instead of retrying TCP in
+        // a permanent loop.
+        if (requestedTransport === "tcp") {
+          preferredTransport = "auto";
+          clearRoutePreference(routeStorage, routePreferenceKey);
+        }
+        throw error;
+      }
     })().finally(() => {
       connecting = false;
       connectPromise = null;
+      if (adaptiveFallbackPending) queueMicrotask(runAdaptiveFallback);
     });
     return connectPromise;
   };
@@ -277,11 +362,80 @@ export async function boot(options: BootOptions): Promise<YuriRTCClient> {
     }, retryInMs);
   };
 
-  client.onDisconnect(() => {
-    // close() is part of a controlled replacement while connecting. The four
-    // lane-close callbacks are also coalesced inside YuriRTCClient.
-    if (!connecting) scheduleRetry();
-  });
+  function runAdaptiveFallback(): void {
+    if (
+      !adaptiveFallbackPending ||
+      adaptiveFallbackAttempted ||
+      connecting ||
+      adaptiveReplacement ||
+      navigator.onLine === false
+    ) return;
+    adaptiveFallbackPending = false;
+    adaptiveFallbackAttempted = true;
+    clearRetry();
+    dispatchNetworkState({ state: "testing" });
+    const previous = activeClient;
+    const replacement = new YuriRTCClient(config, location.pathname);
+    const replacementEpoch = routeNetworkEpoch;
+    let promoted = false;
+    adaptiveReplacement = (async () => {
+      // Warm TCP without touching the worker's only MessagePort. Once open,
+      // the original client delegates only newly allocated request ids to it;
+      // credits/cancels for old ids continue to the UDP route until it drains.
+      const diagnostics = await replacement.connect(undefined, { transport: "tcp" });
+      if (replacementEpoch !== routeNetworkEpoch || navigator.onLine === false) {
+        replacement.retireRoute();
+        return;
+      }
+      previous.adoptSuccessor(replacement);
+      activeClient = replacement;
+      observeClient(replacement);
+      promoted = true;
+      preferredTransport = "tcp";
+      rememberTcpPreference(routeStorage, routePreferenceKey);
+      try {
+        options.onDiagnostics?.(diagnostics);
+      } catch (error) {
+        console.warn("[YuriRTC] diagnostics callback failed", error);
+      }
+      dispatchNetworkState({ state: "connected", route: diagnostics.route });
+
+      let removeDrained = (): void => undefined;
+      removeDrained = previous.onDrained(() => {
+        removeDrained();
+        previous.retireTransport();
+      });
+    })().catch(() => {
+      if (promoted) return;
+      // Passive ICE/TCP is not universal. The established UDP route remains
+      // untouched, and the remembered preference is cleared for the next boot.
+      replacement.retireRoute();
+      preferredTransport = "auto";
+      clearRoutePreference(routeStorage, routePreferenceKey);
+      dispatchNetworkState({ state: "connected", route: { transport: "udp", portClass: "unknown" } });
+    }).finally(() => {
+      adaptiveReplacement = null;
+    });
+  }
+
+  function observeClient(candidate: YuriRTCClient): void {
+    if (observedClients.has(candidate)) return;
+    observedClients.add(candidate);
+    candidate.onAdaptiveTcpSuggested(() => {
+      if (
+        candidate !== activeClient ||
+        adaptiveFallbackAttempted ||
+        adaptiveFallbackPending
+      ) return;
+      adaptiveFallbackPending = true;
+      queueMicrotask(runAdaptiveFallback);
+    });
+    candidate.onDisconnect(() => {
+      // A drained predecessor may close after promotion. Only the route which
+      // owns new work is allowed to start the global reconnect schedule.
+      if (candidate === activeClient && !connecting && !adaptiveReplacement) scheduleRetry();
+    });
+  }
 
   const onReconnectRequest = (event: Event): void => {
     if (!(event instanceof CustomEvent)) return;
@@ -299,7 +453,15 @@ export async function boot(options: BootOptions): Promise<YuriRTCClient> {
     });
   };
   window.addEventListener(RECONNECT_REQUEST_EVENT, onReconnectRequest);
+  window.addEventListener("offline", () => {
+    resetRouteStateForNetworkChange(true);
+  });
   window.addEventListener("online", () => {
+    resetRouteStateForNetworkChange(false);
+    if (adaptiveFallbackPending) {
+      runAdaptiveFallback();
+      return;
+    }
     if (retryTimer === null || connecting) return;
     clearRetry();
     dispatchNetworkState({ state: "testing" });
@@ -308,7 +470,27 @@ export async function boot(options: BootOptions): Promise<YuriRTCClient> {
       else dispatchNetworkState({ state: "unavailable" });
     });
   });
+  // Chromium exposes NetworkInformation for Wi-Fi/cellular transitions that
+  // need not produce an offline event. Firefox and Safari simply omit it, so
+  // their standards-based online/offline behavior remains unchanged.
+  const networkInformation = (navigator as Navigator & {
+    connection?: Pick<EventTarget, "addEventListener"> & {
+      type?: string;
+      effectiveType?: string;
+    };
+  }).connection;
+  let networkSignature = networkInformation
+    ? `${networkInformation.type ?? ""}:${networkInformation.effectiveType ?? ""}`
+    : "";
+  networkInformation?.addEventListener("change", () => {
+    const nextSignature =
+      `${networkInformation.type ?? ""}:${networkInformation.effectiveType ?? ""}`;
+    if (nextSignature === networkSignature) return;
+    networkSignature = nextSignature;
+    resetRouteStateForNetworkChange(true);
+  });
 
+  observeClient(client);
   dispatchNetworkState({ state: "testing" });
   try {
     await connectTransport(false);

@@ -11,12 +11,13 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "build:release": "npm run build -w @edurocks-group/loader && npm run build:release -w learnmathedu",
+    "build:release": "npm run build -w @advwebrec/grainloading && npm run build -w shaintloadingcheckpak && npm run build:release -w learnmathedu && npm run build:release:bundled -w learnmathedu",
     "test": "npm run test --workspaces --if-present",
     "test:e2e": "cd content-node && YURIRTC_BROWSER_E2E=1 go test -count=1 -run TestBrowserV3EndToEnd -v",
     "test:prod-canary": "node deploy/prod-canary.mjs deploy/npm",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "verify:release": "npm run verify:package -w @edurocks-group/loader && npm run verify:package -w learnmathedu"
+    "verify:release": "npm run verify:package -w @advwebrec/grainloading && npm run verify:package -w shaintloadingcheckpak && npm run verify:package -w learnmathedu && npm run verify:bundled -w learnmathedu",
+    "ci:local": "./deploy/ci-local.sh"
   },
   "engines": {
     "node": ">=22"

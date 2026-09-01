@@ -1,9 +1,14 @@
 # Static bucket deployment
 
-A deployment of the carrier is nothing more than a URL that serves two files,
-`index.html` and `sw.js`, from one directory. Standing up another one is
-routine, so there are two scripts: one fills a bucket that already exists, and
-one makes the bucket too.
+The normal carrier is a URL that serves `index.html` and `sw.js` from one
+directory. Standing up another one is routine, so there are two scripts: one
+fills a bucket that already exists, and one makes the bucket too.
+
+For a network that blocks jsDelivr or unpkg, the release pipeline also writes a
+bundled carrier under `deploy/npm/bundled/`. Upload all six files from that
+directory together. The bucket scripts below intentionally keep deploying the
+normal two-file carrier unless an operator selects and uploads the bundled
+directory explicitly.
 
 Both run a fresh release build and verify the artifacts before transferring
 anything, so a placeholder or stale build cannot reach a bucket. A release
@@ -87,7 +92,7 @@ stores answer a directory URL with a listing, a redirect, or an XML error. The
 worker's scope is the directory it is served from, which is why both files must
 stay side by side.
 
-A new loader release reaches every deployed bucket on its own, because the
-carrier resolves the loader through its `latest` npm tag at runtime. Re-upload
-the pair only when the carrier's own bytes change. See `docs/DEPLOYMENT.md` for
-Firebase configuration, hosting requirements, and validation.
+A newly signed pointer release reaches every deployed bucket on its own. The
+carrier verifies that pointer and its immutable loader SHA-256 at runtime.
+Re-upload the pair only when the carrier's own bytes or manifest public key
+change. See `docs/DEPLOYMENT.md` for configuration and validation.

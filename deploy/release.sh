@@ -1,329 +1,334 @@
 #!/usr/bin/env bash
-# Build, verify, and publish both compatibility NPM packages.
+# Verify and stage only the immutable loader and its signed pointer package.
+# Each package requires a separate human 2FA approval before the next pass.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# Local, git-ignored production configuration. Explicit environment variables
-# still win because the file only exports values via its own assignments and
-# the defaults below never overwrite a value that is already set.
-if [[ -f "$ROOT/.env.release" && -z "${YURIRTC_FIREBASE_API_KEY:-}" ]]; then
-  # shellcheck source=/dev/null
-  source "$ROOT/.env.release"
-fi
-
-: "${YURIRTC_FIREBASE_API_KEY:=${FIREBASE_API_KEY:-}}"
-: "${YURIRTC_FIREBASE_PROJECT_ID:=${FIREBASE_PROJECT_ID:-}}"
-: "${YURIRTC_FIREBASE_DATABASE_URL:=${FIREBASE_DATABASE_URL:-}}"
-export YURIRTC_FIREBASE_API_KEY YURIRTC_FIREBASE_PROJECT_ID YURIRTC_FIREBASE_DATABASE_URL
-
-if [[ -z "$YURIRTC_FIREBASE_API_KEY" || -z "$YURIRTC_FIREBASE_PROJECT_ID" || -z "$YURIRTC_FIREBASE_DATABASE_URL" ]]; then
-  echo "set the three YURIRTC_FIREBASE_* release variables" >&2
-  exit 1
-fi
-
-npm run typecheck
-npm test
-(
-  cd content-node
-  go test -count=1 ./...
-  go test -race -count=1 ./...
-  go vet ./...
-  YURIRTC_BROWSER_E2E=1 go test -count=1 -run TestBrowserV3EndToEnd -v
-)
-npm run build:release
-npm run verify:release
-
-if [[ "${YURIRTC_CONTENT_NODE_CANARY_OK:-}" != "1" ]]; then
-  echo "refusing npm publication until a production node compatible with this loader is deployed and canaried" >&2
-  echo "set YURIRTC_CONTENT_NODE_CANARY_OK=1 only after matching-wire checks pass; use a transition node before a future wire change" >&2
-  exit 1
-fi
-
-LOADER_VERSION="$(node -p "require('./packages/loader/package.json').version")"
-STATIC_VERSION="$(node -p "require('./deploy/npm/package.json').version")"
-
-# npm versions are immutable. If a prior run published a package and then
-# stopped while CDN caches converged, resume only when that exact version still
-# owns `latest`; otherwise require an operator to resolve the tag deliberately.
-publish_or_resume_latest() {
-  local workspace="$1"
-  local package_name="$2"
-  local package_version="$3"
-  local versions_json
-  local latest_version
-
-  versions_json="$(npm view "$package_name" versions --json)"
-  if node -e '
-    const published = JSON.parse(process.argv[1]);
-    const versions = Array.isArray(published) ? published : [published];
-    process.exit(versions.includes(process.argv[2]) ? 0 : 1);
-  ' "$versions_json" "$package_version"; then
-    latest_version="$(npm view "$package_name" dist-tags.latest)"
-    if [[ "$latest_version" != "$package_version" ]]; then
-      echo "$package_name@$package_version already exists but latest is $latest_version; refusing to retag automatically" >&2
-      exit 1
-    fi
-    echo "resuming verified release of $package_name@$package_version"
-    return
-  fi
-
-  npm publish -w "$workspace" --access public
-}
-
-publish_or_resume_latest \
-  @edurocks-group/loader \
-  @edurocks-group/loader \
-  "$LOADER_VERSION"
-
-verification_dir="$(mktemp -d)"
-verification_index=0
-cleanup_verification_dir() {
-  rm -rf -- "$verification_dir"
-}
-trap cleanup_verification_dir EXIT
-
-CURL_RELEASE_ARGS=(
-  --fail
-  --location
-  --max-redirs 5
-  --silent
-  --show-error
-  --connect-timeout 5
-  --max-time 20
-  --retry 2
-  --retry-delay 1
-  --retry-max-time 20
-  --retry-all-errors
-)
-
-# npm metadata and tarballs can become visible at different times after a
-# successful publish. Resolve the immutable version and prove that its tarball
-# can be downloaded before asking either CDN to converge on it.
-NPM_VISIBILITY_ATTEMPTS=60
-NPM_VISIBILITY_INTERVAL_SECONDS=5
-CDN_READY_ATTEMPTS=72
-CDN_READY_INTERVAL_SECONDS=5
-
-wait_for_npm_tarball() {
-  local package_name="$1"
-  local package_version="$2"
-  local destination="$3"
-  local tarball_url
-  local attempt
-
-  for ((attempt = 1; attempt <= NPM_VISIBILITY_ATTEMPTS; attempt++)); do
-    tarball_url="$(npm view "$package_name@$package_version" dist.tarball 2>/dev/null || true)"
-    if [[ "$tarball_url" == https://* ]] && \
-       curl "${CURL_RELEASE_ARGS[@]}" --output "$destination" "$tarball_url" && \
-       tar -tzf "$destination" >/dev/null 2>&1; then
-      return
-    fi
-    if ((attempt < NPM_VISIBILITY_ATTEMPTS)); then
-      sleep "$NPM_VISIBILITY_INTERVAL_SECONDS"
-    fi
-  done
-
-  echo "npm did not make $package_name@$package_version and its exact tarball visible in time" >&2
-  exit 1
-}
-
-verify_loader_tarball() {
-  local archive="$1"
-  local package_path
-  local local_path
-  local index
-  local -a expected_paths=(
-    package/README.md
-    package/dist/assets/OFL.txt
-    package/dist/assets/rot13.woff
-    package/dist/bundle/client.js
-    package/dist/bundle/sw-stub.js
-    package/dist/bundle/sw.js
-    package/dist/types/index.d.ts
-    package/package.json
-  )
-  local -a actual_paths
-
-  mapfile -t actual_paths < <(tar -tzf "$archive" | LC_ALL=C sort)
-  if (( ${#actual_paths[@]} != ${#expected_paths[@]} )); then
-    echo "published loader tarball has an unexpected file count" >&2
+private_file() {
+  local path="$1"
+  local label="$2"
+  if [[ ! -f "$path" || -L "$path" ]]; then
+    echo "$label must be a regular, non-symlink file: $path" >&2
     exit 1
   fi
-  for ((index = 0; index < ${#expected_paths[@]}; index++)); do
-    if [[ "${actual_paths[index]}" != "${expected_paths[index]}" ]]; then
-      echo "published loader tarball has an unexpected file list" >&2
-      exit 1
-    fi
-  done
-
-  for package_path in "${expected_paths[@]}"; do
-    local_path="${package_path#package/}"
-    if ! tar -xOzf "$archive" "$package_path" | \
-         cmp -s "packages/loader/$local_path" -; then
-      echo "published loader tarball differs from the verified local file: $local_path" >&2
-      exit 1
-    fi
-  done
+  local owner mode mode_value
+  owner="$(stat -c '%u' "$path")"
+  mode="$(stat -c '%a' "$path")"
+  mode_value=$((8#$mode))
+  if [[ "$owner" != "$(id -u)" || $((mode_value & 022)) -ne 0 ]]; then
+    echo "$label must be owned by the current user and not writable by group or others: $path" >&2
+    exit 1
+  fi
 }
 
-loader_tarball="$verification_dir/loader-$LOADER_VERSION.tgz"
-wait_for_npm_tarball \
-  @edurocks-group/loader \
-  "$LOADER_VERSION" \
-  "$loader_tarball"
-verify_loader_tarball "$loader_tarball"
+ENV_FILE="$ROOT/.env.release"
+AUTH_CONFIG="$ROOT/deploy/npmrc.publish"
+private_file "$ENV_FILE" ".env.release"
+private_file "$AUTH_CONFIG" "npm publish configuration"
 
-# The carrier fetches latest/package.json to resolve an immutable worker URL,
-# while its client and font remain on @latest. Purge every moving jsDelivr path
-# together so a v3 client can never be paired with a stale v2 worker decision.
-for asset in \
-  package.json \
-  dist/bundle/client.js \
-  dist/bundle/sw.js \
-  dist/assets/rot13.woff; do
-  curl "${CURL_RELEASE_ARGS[@]}" \
-    "https://purge.jsdelivr.net/npm/@edurocks-group/loader@latest/$asset" \
-    >/dev/null
-done
+expected_npmrc=$'registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=${NPM_TOKEN}'
+if [[ "$(<"$AUTH_CONFIG")" != "$expected_npmrc" ]]; then
+  echo "deploy/npmrc.publish must contain only the pinned npm registry and NPM_TOKEN reference" >&2
+  exit 1
+fi
 
-cdn_package_version() {
-  local downloaded
-  local metadata
-  local content_type
-  local cors
-  downloaded="$(mktemp "$verification_dir/package.XXXXXX")"
-  metadata="$(curl "${CURL_RELEASE_ARGS[@]}" \
-    --output "$downloaded" \
-    --write-out $'%{content_type}\n%header{access-control-allow-origin}' \
-    "$1")" || return 1
-  content_type="${metadata%%$'\n'*}"
-  cors="${metadata#*$'\n'}"
-  [[ "$content_type" =~ ^application/json($|\;) ]] || return 1
-  [[ "$cors" == "*" ]] || return 1
+# shellcheck source=/dev/null
+source "$ENV_FILE"
+: "${NPM_LOADER_TOKEN:?save NPM_LOADER_TOKEN in .env.release}"
+: "${NPM_INTEGRITY_TOKEN:?save NPM_INTEGRITY_TOKEN in .env.release}"
+: "${YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY:?set the manifest signing private key}"
+
+# Even if the env file exported its values, no repository-controlled test or
+# loader build receives either publication credential or the signing key.
+export -n NPM_LOADER_TOKEN NPM_INTEGRITY_TOKEN \
+  YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY 2>/dev/null || true
+unset NPM_TOKEN NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG
+
+if [[ "${YURIRTC_CONTENT_NODE_CANARY_OK:-}" != "1" ]]; then
+  echo "refusing publication until the compatible production content node has passed its canary" >&2
+  echo "set YURIRTC_CONTENT_NODE_CANARY_OK=1 only after that check succeeds" >&2
+  exit 1
+fi
+
+# Public releases must be reconstructable from the exact source already pushed
+# to the repository. Ignored build products and .env.release do not affect this
+# check.
+if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+  echo "refusing release from a dirty or untracked source tree" >&2
+  exit 1
+fi
+if ! git rev-parse --verify origin/main >/dev/null 2>&1 || \
+   [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+  echo "refusing release until the exact source commit is pushed to origin/main" >&2
+  exit 1
+fi
+
+env -u YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY \
+  -u NPM_LOADER_TOKEN -u NPM_INTEGRITY_TOKEN \
+  -u NPM_TOKEN -u NODE_AUTH_TOKEN -u NPM_CONFIG_USERCONFIG \
+  ./deploy/ci-local.sh
+
+LOADER_NAME="@advwebrec/grainloading"
+POINTER_NAME="shaintloadingcheckpak"
+LOADER_VERSION="$(node -p "require('./packages/loader/package.json').version")"
+POINTER_VERSION="$(node -p "require('./packages/integrity/package.json').version")"
+NPM_STAGE_VERSION="11.19.1"
+VERIFY_DIRECTORY="$(mktemp -d)"
+cleanup() {
+  rm -rf -- "$VERIFY_DIRECTORY"
+}
+trap cleanup EXIT
+
+npm_for_token() {
+  local token="$1"
+  shift
+  NPM_TOKEN="$token" NPM_CONFIG_USERCONFIG="$AUTH_CONFIG" npm "$@"
+}
+
+npm_stage_for_token() {
+  local token="$1"
+  shift
+  NPM_TOKEN="$token" NPM_CONFIG_USERCONFIG="$AUTH_CONFIG" \
+    npx --yes "npm@$NPM_STAGE_VERSION" "$@"
+}
+
+npm_public() {
+  # Registry visibility checks need no credential. Bypass an operator-level
+  # ~/.npmrc so a stale registry override or unrelated token cannot influence
+  # the release decision.
+  NPM_CONFIG_USERCONFIG=/dev/null \
+    NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+    npm "$@"
+}
+
+loader_account="$(npm_for_token "$NPM_LOADER_TOKEN" whoami)"
+pointer_account="$(npm_for_token "$NPM_INTEGRITY_TOKEN" whoami)"
+echo "authenticated loader publisher as $loader_account"
+echo "authenticated integrity publisher as $pointer_account"
+
+version_exists() {
+  npm_public view "$1@$2" version --json >/dev/null 2>&1
+}
+
+require_live_latest() {
+  local name="$1"
+  local version="$2"
+  local latest
+  latest="$(npm_public view "$name" dist-tags.latest)"
+  if [[ "$latest" != "$version" ]]; then
+    echo "$name@$version exists but latest is $latest; refusing to retag automatically" >&2
+    exit 1
+  fi
+}
+
+stage_listing_has_entries() {
   node -e '
     let input = "";
     process.stdin.on("data", (chunk) => { input += chunk; });
     process.stdin.on("end", () => {
-      const version = JSON.parse(input).version;
-      if (typeof version !== "string" || version.length === 0) process.exit(1);
-      process.stdout.write(version);
+      const value = JSON.parse(input);
+      const count = Array.isArray(value)
+        ? value.length
+        : value && typeof value === "object"
+          ? Object.keys(value).length
+          : 0;
+      process.exit(count > 0 ? 0 : 1);
     });
-  ' <"$downloaded"
+  '
 }
 
-latest_ready=0
-for ((attempt = 1; attempt <= CDN_READY_ATTEMPTS; attempt++)); do
-  jsdelivr_version="$(cdn_package_version \
-    "https://cdn.jsdelivr.net/npm/@edurocks-group/loader@latest/package.json" || true)"
-  unpkg_version="$(cdn_package_version \
-    "https://unpkg.com/@edurocks-group/loader@latest/package.json" || true)"
-  if [[ "$jsdelivr_version" == "$LOADER_VERSION" && "$unpkg_version" == "$LOADER_VERSION" ]]; then
-    latest_ready=1
-    break
-  fi
-  if ((attempt < CDN_READY_ATTEMPTS)); then
-    sleep "$CDN_READY_INTERVAL_SECONDS"
-  fi
-done
-if [[ "$latest_ready" != "1" ]]; then
-  echo "both CDNs did not resolve @latest to loader $LOADER_VERSION" >&2
-  exit 1
-fi
+stage_and_pause() {
+  local directory="$1"
+  local name="$2"
+  local version="$3"
+  local token="$4"
+  local sign_pointer="$5"
+  local listing
 
-verify_cdn_asset_once() {
-  local url="$1"
-  local expected_file="$2"
-  local expected_kind="$3"
-  local downloaded="$verification_dir/asset-$verification_index"
-  local metadata
-  local content_type
-  local cors
-  verification_index=$((verification_index + 1))
-
-  metadata="$(curl "${CURL_RELEASE_ARGS[@]}" \
-    --output "$downloaded" \
-    --write-out $'%{content_type}\n%header{access-control-allow-origin}' \
-    "$url")"
-  content_type="${metadata%%$'\n'*}"
-  cors="${metadata#*$'\n'}"
-
-  if ! cmp -s "$expected_file" "$downloaded"; then
-    return 1
-  fi
-  case "$expected_kind" in
-    javascript)
-      if [[ ! "$content_type" =~ ^(application|text)/(javascript|x-javascript)($|\;) ]]; then
-        return 1
-      fi
-      ;;
-    font)
-      if [[ ! "$content_type" =~ ^(font/woff|application/(font-woff|octet-stream))($|\;) ]]; then
-        return 1
-      fi
-      ;;
-    *)
-      echo "unknown CDN asset kind $expected_kind" >&2
+  listing="$(npm_stage_for_token "$token" stage list "$name@$version" --json)"
+  if ! stage_listing_has_entries <<<"$listing"; then
+    echo "staging $name@$version for required human 2FA approval"
+    if [[ "$sign_pointer" == "1" ]]; then
+      (
+        cd "$directory"
+        YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY="$YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY" \
+          NPM_TOKEN="$token" NPM_CONFIG_USERCONFIG="$AUTH_CONFIG" \
+          npx --yes "npm@$NPM_STAGE_VERSION" stage publish . --access public
+      )
+    else
+      (
+        cd "$directory"
+        NPM_TOKEN="$token" NPM_CONFIG_USERCONFIG="$AUTH_CONFIG" \
+          npx --yes "npm@$NPM_STAGE_VERSION" stage publish . --access public
+      )
+    fi
+    listing="$(npm_stage_for_token "$token" stage list "$name@$version" --json)"
+    if ! stage_listing_has_entries <<<"$listing"; then
+      echo "npm accepted the stage command but did not list $name@$version" >&2
       exit 1
-      ;;
-  esac
-  if [[ "$cors" != "*" ]]; then
-    return 1
+    fi
   fi
+
+  echo "pending staged package:"
+  printf '%s\n' "$listing"
+  echo "approve $name@$version with 2FA in the npm website Staged Packages tab, then rerun this command"
+  exit 20
 }
 
-verify_all_cdn_assets_once() {
-  local base
-  for base in \
-    "https://cdn.jsdelivr.net/npm/@edurocks-group/loader" \
-    "https://unpkg.com/@edurocks-group/loader"; do
-    verify_cdn_asset_once \
-      "$base@latest/dist/bundle/client.js" \
-      packages/loader/dist/bundle/client.js \
-      javascript || return 1
-    verify_cdn_asset_once \
-      "$base@latest/dist/bundle/sw.js" \
-      packages/loader/dist/bundle/sw.js \
-      javascript || return 1
-    verify_cdn_asset_once \
-      "$base@$LOADER_VERSION/dist/bundle/sw.js" \
-      packages/loader/dist/bundle/sw.js \
-      javascript || return 1
-    verify_cdn_asset_once \
-      "$base@latest/dist/assets/rot13.woff" \
-      packages/loader/dist/assets/rot13.woff \
-      font || return 1
+CURL_ARGS=(
+  --fail --location --silent --show-error
+  --connect-timeout 5 --max-time 30
+  --retry 3 --retry-delay 1 --retry-all-errors
+)
+
+wait_for_tarball() {
+  local name="$1"
+  local version="$2"
+  local output="$3"
+  local url attempt
+  for ((attempt = 1; attempt <= 60; attempt += 1)); do
+    url="$(npm_public view "$name@$version" dist.tarball 2>/dev/null || true)"
+    if [[ "$url" == https://* ]] && \
+       curl "${CURL_ARGS[@]}" --output "$output" "$url" && \
+       tar -tzf "$output" >/dev/null; then
+      return
+    fi
+    if ((attempt < 60)); then sleep 5; fi
+  done
+  echo "timed out waiting for $name@$version tarball" >&2
+  exit 1
+}
+
+verify_tarball_exact() {
+  local archive="$1"
+  local local_directory="$2"
+  shift 2
+  local -a expected actual
+  local relative
+  mapfile -t expected < <(printf 'package/%s\n' "$@" | LC_ALL=C sort)
+  mapfile -t actual < <(tar -tzf "$archive" | LC_ALL=C sort)
+  if [[ "${actual[*]}" != "${expected[*]}" ]]; then
+    echo "published tarball has an unexpected file list" >&2
+    printf 'expected: %s\n' "${expected[*]}" >&2
+    printf 'actual:   %s\n' "${actual[*]}" >&2
+    exit 1
+  fi
+  for relative in "$@"; do
+    if ! tar -xOzf "$archive" "package/$relative" | \
+         cmp -s "$local_directory/$relative" -; then
+      echo "published bytes differ from $local_directory/$relative" >&2
+      exit 1
+    fi
   done
 }
 
-assets_ready=0
-for ((attempt = 1; attempt <= CDN_READY_ATTEMPTS; attempt++)); do
-  if verify_all_cdn_assets_once; then
-    assets_ready=1
-    break
+wait_for_exact_cdn_asset() {
+  local url="$1"
+  local expected_file="$2"
+  local kind="$3"
+  local downloaded="$VERIFY_DIRECTORY/cdn-${RANDOM}"
+  local metadata content_type cors attempt
+  for ((attempt = 1; attempt <= 72; attempt += 1)); do
+    metadata="$(curl "${CURL_ARGS[@]}" \
+      --output "$downloaded" \
+      --write-out $'%{content_type}\n%header{access-control-allow-origin}' \
+      "$url" 2>/dev/null || true)"
+    content_type="${metadata%%$'\n'*}"
+    cors="${metadata#*$'\n'}"
+    if cmp -s "$expected_file" "$downloaded" && [[ "$cors" == "*" ]]; then
+      case "$kind" in
+        javascript)
+          [[ "$content_type" =~ ^(application|text)/(javascript|x-javascript)($|\;) ]] && return
+          ;;
+        font)
+          [[ "$content_type" =~ ^(font/woff|application/(font-woff|octet-stream))($|\;) ]] && return
+          ;;
+        json)
+          [[ "$content_type" =~ ^application/json($|\;) ]] && return
+          ;;
+      esac
+    fi
+    if ((attempt < 72)); then sleep 5; fi
+  done
+  echo "$url did not serve the exact verified bytes with the required MIME and CORS headers" >&2
+  exit 1
+}
+
+if ! version_exists "$LOADER_NAME" "$LOADER_VERSION"; then
+  stage_and_pause packages/loader "$LOADER_NAME" "$LOADER_VERSION" "$NPM_LOADER_TOKEN" 0
+fi
+require_live_latest "$LOADER_NAME" "$LOADER_VERSION"
+
+loader_tarball="$VERIFY_DIRECTORY/loader-$LOADER_VERSION.tgz"
+wait_for_tarball "$LOADER_NAME" "$LOADER_VERSION" "$loader_tarball"
+verify_tarball_exact "$loader_tarball" packages/loader \
+  DISCLOSURE LICENSE README.md package.json \
+  dist/bundle/client.js dist/bundle/sw.js dist/bundle/sw-stub.js \
+  dist/types/index.d.ts dist/assets/rot13.woff dist/assets/OFL.txt
+
+for base in \
+  "https://cdn.jsdelivr.net/npm/$LOADER_NAME@$LOADER_VERSION" \
+  "https://unpkg.com/$LOADER_NAME@$LOADER_VERSION"; do
+  wait_for_exact_cdn_asset "$base/dist/bundle/client.js" packages/loader/dist/bundle/client.js javascript
+  wait_for_exact_cdn_asset "$base/dist/bundle/sw.js" packages/loader/dist/bundle/sw.js javascript
+  wait_for_exact_cdn_asset "$base/dist/bundle/sw-stub.js" packages/loader/dist/bundle/sw-stub.js javascript
+  wait_for_exact_cdn_asset "$base/dist/assets/rot13.woff" packages/loader/dist/assets/rot13.woff font
+done
+echo "verified live loader $LOADER_NAME@$LOADER_VERSION on npm, jsDelivr, and unpkg"
+
+if ! version_exists "$POINTER_NAME" "$POINTER_VERSION"; then
+  pointer_listing="$(npm_stage_for_token "$NPM_INTEGRITY_TOKEN" stage list "$POINTER_NAME@$POINTER_VERSION" --json)"
+  if ! stage_listing_has_entries <<<"$pointer_listing"; then
+    # Sign only after every immutable loader runtime asset is live on both CDNs.
+    YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY="$YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY" \
+      npm run build -w "$POINTER_NAME"
+    npm run verify:package -w "$POINTER_NAME"
   fi
-  if ((attempt < CDN_READY_ATTEMPTS)); then
-    sleep "$CDN_READY_INTERVAL_SECONDS"
+  stage_and_pause packages/integrity "$POINTER_NAME" "$POINTER_VERSION" "$NPM_INTEGRITY_TOKEN" 1
+fi
+require_live_latest "$POINTER_NAME" "$POINTER_VERSION"
+
+pointer_tarball="$VERIFY_DIRECTORY/$POINTER_NAME-$POINTER_VERSION.tgz"
+wait_for_tarball "$POINTER_NAME" "$POINTER_VERSION" "$pointer_tarball"
+
+# The ECDSA signature is intentionally fresh on each signing build. Compare the
+# immutable metadata and license bytes exactly, then validate the published
+# manifest cryptographically and use it as the CDN byte authority.
+for relative in DISCLOSURE LICENSE package.json; do
+  if ! tar -xOzf "$pointer_tarball" "package/$relative" | \
+       cmp -s "packages/integrity/$relative" -; then
+    echo "published bytes differ from packages/integrity/$relative" >&2
+    exit 1
   fi
 done
-if [[ "$assets_ready" != "1" ]]; then
-  echo "both CDNs did not serve all exact release bytes with valid MIME and CORS in time" >&2
+mapfile -t pointer_paths < <(tar -tzf "$pointer_tarball" | LC_ALL=C sort)
+expected_pointer_paths=(
+  package/DISCLOSURE package/LICENSE package/loader.json package/package.json
+)
+if [[ "${pointer_paths[*]}" != "${expected_pointer_paths[*]}" ]]; then
+  echo "published pointer tarball has an unexpected file list" >&2
   exit 1
 fi
+tar -xOzf "$pointer_tarball" package/loader.json >"$VERIFY_DIRECTORY/published-loader.json"
+node packages/integrity/verify-package.mjs \
+  --manifest-only "$VERIFY_DIRECTORY/published-loader.json"
 
-publish_or_resume_latest learnmathedu learnmathedu "$STATIC_VERSION"
+curl "${CURL_ARGS[@]}" \
+  "https://purge.jsdelivr.net/npm/$POINTER_NAME@latest/loader.json" >/dev/null || true
+for url in \
+  "https://cdn.jsdelivr.net/npm/$POINTER_NAME@latest/loader.json" \
+  "https://unpkg.com/$POINTER_NAME@latest/loader.json"; do
+  wait_for_exact_cdn_asset "$url" "$VERIFY_DIRECTORY/published-loader.json" json
+done
 
-static_tarball="$verification_dir/learnmathedu-$STATIC_VERSION.tgz"
-static_extract="$verification_dir/learnmathedu-$STATIC_VERSION"
-mkdir "$static_extract"
-wait_for_npm_tarball learnmathedu "$STATIC_VERSION" "$static_tarball"
-tar -xzf "$static_tarball" -C "$static_extract" package/index.html package/sw.js
-if ! cmp -s deploy/npm/index.html "$static_extract/package/index.html" || \
-   ! cmp -s deploy/npm/sw.js "$static_extract/package/sw.js"; then
-  echo "published learnmathedu@$STATIC_VERSION does not match the verified local carrier" >&2
-  exit 1
-fi
+# The public carrier now resolves the new pointer. Exercise default routing and
+# both forced transport paths against the production content node.
+npm run test:prod-canary
+YURIRTC_CANARY_PROTOCOL=udp npm run test:prod-canary
+YURIRTC_CANARY_PROTOCOL=tcp npm run test:prod-canary
 
-echo "published @edurocks-group/loader@$LOADER_VERSION and learnmathedu@$STATIC_VERSION"
-echo "both CDNs resolve @latest to loader $LOADER_VERSION and serve its client, worker, and font"
+echo "published and verified $LOADER_NAME@$LOADER_VERSION"
+echo "published and verified $POINTER_NAME@$POINTER_VERSION"
+echo "production default, UDP, and TCP canaries passed"

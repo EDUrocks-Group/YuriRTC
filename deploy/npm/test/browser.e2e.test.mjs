@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -9,11 +9,17 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { chromium } from "playwright-core";
+import {
+  base64url,
+  loaderDescriptor,
+  signManifest
+} from "../../../packages/integrity/manifest-crypto.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_DIR = join(HERE, "..");
 const FONT_PATH = join(PACKAGE_DIR, "..", "..", "packages", "loader", "assets", "rot13.woff");
 const EXPECTED_FONT_SHA256 = "94f4eb3f78b78c6aa70f9c0a9c846a9e0ed430151d35a62aa758aea78a98e2d5";
+const LOADER_VERSION = "0.5.1";
 
 const startPage = `<!doctype html>
 <html><head><meta charset="utf-8"><title>YuriRTC test app</title></head>
@@ -100,6 +106,16 @@ export async function boot(options) {
   });
 }
 `;
+const mockClientBytes = new TextEncoder().encode(mockClient);
+const testSigningKeys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+const testPublicKey = base64url(
+  testSigningKeys.publicKey.export({ format: "der", type: "spki" })
+);
+const mockLoaderDescriptor = loaderDescriptor(
+  LOADER_VERSION,
+  createHash("sha256").update(mockClientBytes).digest("base64url")
+);
+const mockManifest = JSON.stringify(signManifest(mockLoaderDescriptor, testSigningKeys.privateKey));
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -126,10 +142,18 @@ async function findChromium() {
   return null;
 }
 
-function buildRelease(outputDirectory) {
+function buildRelease(outputDirectory, { bundled = false } = {}) {
+  const arguments_ = [
+    "build.mjs",
+    "--release",
+    "--test-manifest-public-key",
+    "--out-dir",
+    outputDirectory
+  ];
+  if (bundled) arguments_.push("--bundled-loader");
   const result = spawnSync(
     process.execPath,
-    ["build.mjs", "--release", "--out-dir", outputDirectory],
+    arguments_,
     {
       cwd: PACKAGE_DIR,
       encoding: "utf8",
@@ -137,7 +161,9 @@ function buildRelease(outputDirectory) {
         ...process.env,
         YURIRTC_FIREBASE_API_KEY: "browser-test-public-key",
         YURIRTC_FIREBASE_PROJECT_ID: "browser-test-project",
-        YURIRTC_FIREBASE_DATABASE_URL: "https://browser-test.invalid"
+        YURIRTC_FIREBASE_DATABASE_URL: "https://browser-test.invalid",
+        YURIRTC_BROWSER_E2E_BUILD: "1",
+        YURIRTC_TEST_MANIFEST_PUBLIC_KEY: testPublicKey
       }
     }
   );
@@ -178,7 +204,7 @@ async function localServer(indexHtml, serviceWorker) {
 async function runHostingScenario(browser, server, font, prefix) {
   const context = await browser.newContext({ serviceWorkers: "allow" });
   context.setDefaultTimeout(15_000);
-  const network = { client: [], font: [], worker: [], forbidden: [], sameOrigin: [] };
+  const network = { manifest: [], client: [], font: [], worker: [], icons: [], forbidden: [], sameOrigin: [] };
   let releaseFont;
   const fontGate = new Promise((resolve) => { releaseFont = resolve; });
 
@@ -195,12 +221,17 @@ async function runHostingScenario(browser, server, font, prefix) {
     const allowedHost = url.hostname === "unpkg.com" || url.hostname === "cdn.jsdelivr.net";
     // jsdelivr prefixes package paths with /npm/, unpkg does not. Normalize.
     const path = url.pathname.replace(/^\/npm\//, "/");
-    const versionPath = "/@edurocks-group/loader@latest/dist/";
-    // The worker stub importScripts the moving dist-tag directly. It used to
-    // resolve an exact version first with a synchronous XMLHttpRequest, which
-    // does not exist in a worker -- see deploy/npm/src/sw.js.
-    const pinnedWorkerPath = `${versionPath}bundle/sw.js`;
-    if (allowedHost && path === `${versionPath}bundle/client.js`) {
+    const versionPath = `/@advwebrec/grainloading@${LOADER_VERSION}/dist/`;
+    const pointerPath = "/shaintloadingcheckpak@latest/loader.json";
+    if (allowedHost && path === pointerPath) {
+      network.manifest.push(url.href);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json; charset=utf-8",
+        headers: { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" },
+        body: mockManifest
+      });
+    } else if (allowedHost && path === `${versionPath}bundle/client.js`) {
       network.client.push(url.href);
       await route.fulfill({
         status: 200,
@@ -217,13 +248,21 @@ async function runHostingScenario(browser, server, font, prefix) {
         headers: { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" },
         body: font
       });
-    } else if (allowedHost && path === pinnedWorkerPath) {
+    } else if (allowedHost && path === `${versionPath}bundle/sw.js`) {
       network.worker.push(url.href);
       await route.fulfill({
         status: 200,
         contentType: "application/javascript; charset=utf-8",
         headers: { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" },
         body: mockWorker
+      });
+    } else if (url.hostname === "fonts.googleapis.com") {
+      network.icons.push(url.href);
+      await route.fulfill({
+        status: 200,
+        contentType: "text/css; charset=utf-8",
+        headers: { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" },
+        body: ".material-symbols-rounded{font-family:system-ui}"
       });
     } else {
       network.forbidden.push(url.href);
@@ -305,7 +344,7 @@ async function runHostingScenario(browser, server, font, prefix) {
       const root = getComputedStyle(document.documentElement);
       const canvas = document.createElement("canvas");
       const drawing = canvas.getContext("2d");
-      drawing.font = "400 18px YuriRTCDisplay";
+      drawing.font = `400 18px ${body.fontFamily}`;
       const customWidth = drawing.measureText("LhevEGP").width;
       drawing.font = "400 18px monospace";
       const fallbackWidth = drawing.measureText("LhevEGP").width;
@@ -324,7 +363,7 @@ async function runHostingScenario(browser, server, font, prefix) {
         networkTier: document.querySelector("[data-yurirtc-network]")?.dataset.yurirtcNetworkTier,
         primary: root.getPropertyValue("--primary").trim(),
         surface: root.getPropertyValue("--surface").trim(),
-        fontLoaded: document.fonts.check("400 18px YuriRTCDisplay", "LhevEGP"),
+        fontLoaded: document.fonts.check(`400 18px ${body.fontFamily}`, "LhevEGP"),
         customWidth,
         fallbackWidth,
         boot: window.__YURIRTC_E2E__,
@@ -348,13 +387,13 @@ async function runHostingScenario(browser, server, font, prefix) {
     assert.equal(presentation.networkLabel, "Argjbex Prafbefuvc Yriry");
     assert.equal(presentation.networkState, "connected");
     assert.equal(presentation.networkTier, "udp-standard");
-    assert.match(presentation.bodyFont, /^['\"]?YuriRTCDisplay['\"]?$/);
+    assert.match(presentation.bodyFont, /^['\"]?_[A-Za-z0-9]{9}['\"]?$/);
     assert.equal(presentation.fontLoaded, true);
     assert.ok(Math.abs(presentation.customWidth - presentation.fallbackWidth) > 0.1,
       "the exact ROT13 display font must render instead of a fallback");
 
     const expectedScope = `${server.origin}${prefix}`;
-    const expectedWorker = `${expectedScope}sw.js`;
+    const expectedWorker = `${expectedScope}sw.js?yurirtc-loader=${LOADER_VERSION}`;
     assert.deepEqual(presentation.boot, {
       appPath: "/",
       scope: expectedScope,
@@ -532,9 +571,11 @@ async function runHostingScenario(browser, server, font, prefix) {
     await forward;
     assert.equal(page.url(), entry);
 
-    assert.equal(network.client.length, 1, "the latest loader client should load once");
-    assert.equal(network.font.length, 1, "the latest font should load once");
-    assert.equal(network.worker.length, 1, "the latest worker bundle should load once");
+    assert.equal(network.manifest.length, 1, "the signed loader pointer should load once");
+    assert.equal(network.client.length, 1, "the immutable loader client should load once");
+    assert.equal(network.font.length, 1, "the immutable font should load once");
+    assert.equal(network.worker.length, 1, "the immutable worker bundle should load once");
+    assert.equal(network.icons.length, 1, "the hosted Material Symbols stylesheet should load once");
     assert.deepEqual(network.forbidden, [], "no Firebase or other external request may escape mocks");
     assert.ok(network.sameOrigin.length >= 5, "carrier, worker, and app requests should be observable");
     for (const pathname of network.sameOrigin) {
@@ -592,6 +633,207 @@ test("generated carrier is path-contained and usable in a real browser", { timeo
       runHostingScenario(browser, server, font, "/"));
     await t.test("nested bucket deployment", () =>
       runHostingScenario(browser, server, font, "/docu-store/releases/current/"));
+  } finally {
+    await browser?.close();
+    await server?.close();
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test("carrier handles loader CDN and integrity failures before execution", { timeout: 60_000 }, async (t) => {
+  const executablePath = await findChromium();
+  if (!executablePath) {
+    t.skip("Chromium was not found; set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH or CHROME_PATH");
+    return;
+  }
+
+  const outputDirectory = await mkdtemp(join(tmpdir(), "yurirtc-integrity-e2e-"));
+  let browser;
+  let server;
+  try {
+    buildRelease(outputDirectory);
+    const [indexHtml, serviceWorker] = await Promise.all([
+      readFile(join(outputDirectory, "index.html")),
+      readFile(join(outputDirectory, "sw.js"))
+    ]);
+    server = await localServer(indexHtml, serviceWorker);
+    browser = await chromium.launch({ executablePath, headless: true, args: ["--no-sandbox"] });
+
+    async function scenario(mode) {
+      const context = await browser.newContext({ serviceWorkers: "allow" });
+      const seen = { manifest: 0, loader: 0, icons: 0 };
+      await context.route("**/*", async (route) => {
+        const url = new URL(route.request().url());
+        if (url.origin === server.origin) return route.continue();
+        const path = url.pathname.replace(/^\/npm\//, "/");
+        if (url.hostname === "fonts.googleapis.com") {
+          seen.icons += 1;
+          return route.fulfill({ status: 200, contentType: "text/css", body: ".material-symbols-rounded{font-family:system-ui}" });
+        }
+        if (path === "/shaintloadingcheckpak@latest/loader.json") {
+          seen.manifest += 1;
+          if (mode === "cdn") return route.abort("blockedbyclient");
+          const document = JSON.parse(mockManifest);
+          if (mode === "signature") {
+            document.signature.value = `${document.signature.value[0] === "A" ? "B" : "A"}${document.signature.value.slice(1)}`;
+          }
+          return route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            headers: { "Access-Control-Allow-Origin": "*" },
+            body: JSON.stringify(document)
+          });
+        }
+        if (path === `/@advwebrec/grainloading@${LOADER_VERSION}/dist/bundle/client.js`) {
+          seen.loader += 1;
+          return route.fulfill({
+            status: 200,
+            contentType: "application/javascript",
+            headers: { "Access-Control-Allow-Origin": "*" },
+            body: `${mockClient}\n// rewritten by integrity e2e`
+          });
+        }
+        if (path === `/@advwebrec/grainloading@${LOADER_VERSION}/dist/bundle/sw.js`) {
+          return route.fulfill({
+            status: 200,
+            contentType: "application/javascript",
+            headers: { "Access-Control-Allow-Origin": "*" },
+            body: mockWorker
+          });
+        }
+        return route.abort("blockedbyclient");
+      });
+      const page = await context.newPage();
+      await page.goto(`${server.origin}/index.html`, { waitUntil: "commit" });
+      return { context, page, seen };
+    }
+
+    await t.test("total CDN failure shows the support error", async () => {
+      const { context, page, seen } = await scenario("cdn");
+      try {
+        const error = await page.waitForSelector('[data-yurirtc-loader-error="cdn-unavailable"]');
+        const display = await error.evaluate((node) => ({
+          title: node.querySelector("h1")?.textContent,
+          body: node.querySelector("p")?.textContent,
+          retry: node.querySelector("[data-yurirtc-loader-retry]")?.textContent,
+          shadow: getComputedStyle(node.firstElementChild).boxShadow
+        }));
+        assert.equal(display.title, "Loader unavailable");
+        assert.equal(display.body, "Loader code via CDN blocker or not available, please email allhands@edurocks.org for further help");
+        assert.equal(display.retry, "Retry");
+        assert.equal(display.shadow, "none");
+        assert.equal(seen.manifest, 2);
+        assert.equal(seen.loader, 0);
+        assert.equal(seen.icons, 1);
+      } finally {
+        await context.close();
+      }
+    });
+
+    await t.test("invalid signatures warn before requesting loader code", async () => {
+      const { context, page, seen } = await scenario("signature");
+      try {
+        await page.waitForSelector('[data-yurirtc-loader-error="integrity"]');
+        assert.equal(seen.manifest, 2);
+        assert.equal(seen.loader, 0);
+      } finally {
+        await context.close();
+      }
+    });
+
+    await t.test("hash mismatches require a three-second explicit continuation", async () => {
+      const { context, page, seen } = await scenario("hash");
+      try {
+        const warning = await page.waitForSelector('[data-yurirtc-loader-error="integrity"]');
+        const initial = await warning.evaluate((node) => ({
+          title: node.querySelector("h1")?.textContent,
+          body: node.querySelector("p")?.textContent,
+          link: node.querySelector("a")?.href,
+          disabled: node.querySelector("[data-yurirtc-loader-continue]")?.disabled,
+          shadow: getComputedStyle(node.firstElementChild).boxShadow
+        }));
+        assert.equal(initial.title, "Loader integrity could not be verified.");
+        assert.match(initial.body, /managed device.*MiTM rewriting attack.*adblocker/s);
+        assert.equal(initial.link, "https://www.fortinet.com/resources/cyberglossary/man-in-the-middle-attack");
+        assert.equal(initial.disabled, true);
+        assert.equal(initial.shadow, "none");
+        await page.waitForFunction(() => !document.querySelector("[data-yurirtc-loader-continue]")?.disabled);
+        await page.locator("[data-yurirtc-loader-continue]").click();
+        await page.waitForFunction(() => typeof window.__YURIRTC_E2E_CONTINUE__ === "function");
+        assert.equal(seen.loader, 2, "both mismatching CDN copies must be checked before warning");
+      } finally {
+        await context.close();
+      }
+    });
+  } finally {
+    await browser?.close();
+    await server?.close();
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test("bundled carrier detects rewritten inline loader bytes without CDN access", { timeout: 60_000 }, async (t) => {
+  const executablePath = await findChromium();
+  if (!executablePath) {
+    t.skip("Chromium was not found; set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH or CHROME_PATH");
+    return;
+  }
+
+  const outputDirectory = await mkdtemp(join(tmpdir(), "yurirtc-bundled-integrity-e2e-"));
+  let browser;
+  let server;
+  try {
+    buildRelease(outputDirectory, { bundled: true });
+    let indexHtml = await readFile(join(outputDirectory, "index.html"), "utf8");
+    const serviceWorker = await readFile(join(outputDirectory, "sw.js"));
+    const encoded = indexHtml.match(
+      /<script\b(?=[^>]*\btype=(?:["']?application\/octet-stream["']?))[^>]*>([A-Za-z0-9+/=]+)<\/script>/i
+    )?.[1];
+    assert.ok(encoded, "bundled build lost its inline loader payload");
+    const rewritten = `${encoded[0] === "A" ? "B" : "A"}${encoded.slice(1)}`;
+    indexHtml = indexHtml.replace(encoded, rewritten);
+    server = await localServer(indexHtml, serviceWorker);
+    browser = await chromium.launch({ executablePath, headless: true, args: ["--no-sandbox"] });
+    const context = await browser.newContext({ serviceWorkers: "allow" });
+    let npmCdnRequests = 0;
+    await context.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.origin === server.origin) return route.continue();
+      if (url.hostname === "fonts.googleapis.com") {
+        return route.fulfill({
+          status: 200,
+          contentType: "text/css",
+          body: ".material-symbols-rounded{font-family:system-ui}"
+        });
+      }
+      if (url.hostname === "cdn.jsdelivr.net" || url.hostname === "unpkg.com") {
+        npmCdnRequests += 1;
+      }
+      return route.abort("blockedbyclient");
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto(`${server.origin}/index.html`, { waitUntil: "commit" });
+      const warning = await page.waitForSelector('[data-yurirtc-loader-error="integrity"]');
+      const state = await warning.evaluate((node) => ({
+        stage: node.dataset.yurirtcLoaderIntegrityStage,
+        reason: node.dataset.yurirtcLoaderIntegrityReason,
+        disabled: node.querySelector("[data-yurirtc-loader-continue]")?.disabled
+      }));
+      assert.deepEqual(state, {
+        stage: "loader-hash",
+        reason: "loader-hash",
+        disabled: true
+      });
+      assert.equal(npmCdnRequests, 0, "bundled integrity handling contacted an npm CDN");
+      assert.deepEqual(
+        server.requests.filter((path) => path !== "/favicon.ico"),
+        ["/index.html"],
+        "rewritten inline bytes must fail before service-worker registration"
+      );
+    } finally {
+      await context.close();
+    }
   } finally {
     await browser?.close();
     await server?.close();

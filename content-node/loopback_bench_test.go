@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -162,6 +163,7 @@ func newLoopbackBenchmarkPeer(
 	ports := freeDualPorts(b, bindIP, 1)
 	rtc, err := buildTransport(options{
 		bindIP: bindIP.String(), publicIP: bindIP.String(), ports: ports,
+		sctpCC: os.Getenv("YURIRTC_BENCH_SCTP_CC"),
 	})
 	if err != nil {
 		b.Fatalf("build transport: %v", err)
@@ -338,15 +340,42 @@ func BenchmarkLoopbackDownload(b *testing.B) {
 	}
 }
 
+// BenchmarkWANDownload is the stable entry point used by wan-regression.sh.
+// The ordinary loopback benchmarks and WAN matrix default to a 64 MiB fixture
+// so congestion-control ramp-up does not dominate the sustained-throughput
+// result. The WAN matrix can override that size when a runner needs it.
+func wanBenchmarkFileBytes(b *testing.B) int {
+	b.Helper()
+	fileMiB := 64
+	if configured := os.Getenv("YURIRTC_WAN_BENCH_MIB"); configured != "" {
+		parsed, err := strconv.Atoi(configured)
+		if err != nil || parsed < 8 || parsed > 1024 {
+			b.Fatalf("YURIRTC_WAN_BENCH_MIB must be an integer in 8..1024, got %q", configured)
+		}
+		fileMiB = parsed
+	}
+	return fileMiB * 1024 * 1024
+}
+
+func BenchmarkWANDownload(b *testing.B) {
+	fileBytes := wanBenchmarkFileBytes(b)
+	for _, protocol := range loopbackBenchmarkProtocols {
+		protocol := protocol
+		b.Run(protocol.name, func(b *testing.B) {
+			benchmarkLoopbackDownload(b, protocol, fileBytes, 32, 8)
+		})
+	}
+}
+
 // Three parallel requests on three lanes over one association, matching how the
 // browser splits concurrent bulk assets. Scaling shows whether the limit is
 // per-lane serialization or shared SCTP/DTLS CPU.
 func benchmarkLoopbackParallelDownload(
 	b *testing.B,
 	protocol loopbackBenchmarkProtocol,
+	fileBytes int,
 ) {
 	const (
-		fileBytes     = 64 * 1024 * 1024
 		laneCount     = 3
 		initialCredit = uint32(64)
 		refillBatch   = uint32(16)
@@ -363,7 +392,7 @@ func benchmarkLoopbackParallelDownload(
 	}
 	peer := newLoopbackBenchmarkPeer(b, root, protocol, laneCount)
 
-	b.SetBytes(laneCount * fileBytes)
+	b.SetBytes(int64(laneCount * fileBytes))
 	b.ResetTimer()
 	var transferElapsed time.Duration
 	for iteration := 0; iteration < b.N; iteration++ {
@@ -417,7 +446,20 @@ func BenchmarkLoopbackParallelDownload(b *testing.B) {
 	for _, protocol := range loopbackBenchmarkProtocols {
 		protocol := protocol
 		b.Run(protocol.name, func(b *testing.B) {
-			benchmarkLoopbackParallelDownload(b, protocol)
+			benchmarkLoopbackParallelDownload(b, protocol, 64*1024*1024)
+		})
+	}
+}
+
+// BenchmarkWANParallelDownload confirms that concurrent assets do not turn
+// one lossy SCTP association into a slowest-stream tail. The byte count applies
+// to each of the three lanes.
+func BenchmarkWANParallelDownload(b *testing.B) {
+	fileBytes := wanBenchmarkFileBytes(b)
+	for _, protocol := range loopbackBenchmarkProtocols {
+		protocol := protocol
+		b.Run(protocol.name, func(b *testing.B) {
+			benchmarkLoopbackParallelDownload(b, protocol, fileBytes)
 		})
 	}
 }

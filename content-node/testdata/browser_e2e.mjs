@@ -1,57 +1,69 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
-import { chromium } from "playwright-core";
+import { chromium, firefox, webkit } from "playwright-core";
 
 const exchangeUrl = process.env.YURIRTC_E2E_EXCHANGE_URL;
 const carrierDir = process.env.YURIRTC_E2E_CARRIER_DIR;
+const carrierVariant = (process.env.YURIRTC_E2E_CARRIER_VARIANT ?? "cdn").trim().toLowerCase();
+assert.ok(carrierVariant === "cdn" || carrierVariant === "bundled",
+  "YURIRTC_E2E_CARRIER_VARIANT must be cdn or bundled");
+const bundledCarrier = carrierVariant === "bundled";
 const repositoryRoot = process.env.YURIRTC_E2E_REPOSITORY_ROOT;
-assert.ok(exchangeUrl && carrierDir && repositoryRoot, "browser E2E environment is incomplete");
+const pointerPath = process.env.YURIRTC_E2E_POINTER_PATH;
+const manifestPublicKey = process.env.YURIRTC_E2E_MANIFEST_PUBLIC_KEY;
+const firestoreBaseUrl = process.env.YURIRTC_E2E_FIRESTORE_BASE_URL;
+const iceHost = process.env.YURIRTC_E2E_ICE_HOST;
+assert.ok(
+  exchangeUrl && carrierDir && repositoryRoot && manifestPublicKey && firestoreBaseUrl && iceHost,
+  "browser E2E environment is incomplete"
+);
+assert.match(iceHost, /^(?:\d{1,3}\.){3}\d{1,3}$/, "browser E2E ICE host must be IPv4");
 const forcedProtocol = (process.env.YURIRTC_E2E_PROTOCOL ?? "all").trim().toLowerCase();
 assert.ok(
   forcedProtocol === "all" || forcedProtocol === "udp" || forcedProtocol === "tcp",
   "YURIRTC_E2E_PROTOCOL must be all, udp, or tcp"
 );
+const configureUrl = new URL(exchangeUrl);
+configureUrl.pathname = "/configure";
+configureUrl.search = "";
+configureUrl.searchParams.set("protocol", forcedProtocol);
+const configured = await fetch(configureUrl, { method: "POST" });
+assert.equal(configured.status, 204, `could not configure ${forcedProtocol} browser E2E signaling`);
+const browserName = (process.env.YURIRTC_E2E_BROWSER ?? "chromium").trim().toLowerCase();
+const browserTypes = { chromium, firefox, webkit };
+assert.ok(browserName in browserTypes, "YURIRTC_E2E_BROWSER must be chromium, firefox, or webkit");
+const browserType = browserTypes[browserName];
+const browserTimeoutMs = Number(process.env.YURIRTC_E2E_TIMEOUT_MS ?? 90_000);
+assert.ok(Number.isFinite(browserTimeoutMs) && browserTimeoutMs >= 5_000,
+  "YURIRTC_E2E_TIMEOUT_MS must be at least 5000");
 
-const candidateProtocol = (candidate) => {
-  const match = String(candidate).trim().match(
-    /^(?:a=)?candidate:\S+\s+\d+\s+([^\s]+)/i
-  );
-  return match?.[1]?.toLowerCase();
-};
-
-const forceAnswerProtocol = (answer) => {
-  if (forcedProtocol === "all") return answer;
-  const sdp = String(answer.sdp).replace(
-    /^a=candidate:[^\r\n]*(?:\r\n|\n|$)/gim,
-    (line) => candidateProtocol(line) === forcedProtocol ? line : ""
-  );
-  const candidates = Array.isArray(answer.candidates)
-    ? answer.candidates.filter((candidate) =>
-        candidateProtocol(candidate?.candidate ?? candidate) === forcedProtocol
-      )
-    : [];
-  assert.match(
-    sdp,
-    new RegExp(`^a=candidate:\\S+\\s+\\d+\\s+${forcedProtocol}\\s`, "im"),
-    `local answer has no ${forcedProtocol} candidate`
-  );
-  return { ...answer, sdp, candidates };
+const requestLabel = (request) => {
+  const url = new URL(request.url());
+  const path = url.pathname.replace(/[0-9a-f]{32}/g, "<capability>");
+  return `${request.method()} ${url.origin}${path}`;
 };
 
 const loaderPackage = JSON.parse(
   await readFile(join(repositoryRoot, "packages", "loader", "package.json"), "utf8")
 );
 const loaderVersion = String(loaderPackage.version);
-const [indexHtml, workerStub, clientBundle, workerBundle, displayFont] = await Promise.all([
+const [indexHtml, workerStub, clientBundle, workerBundle, displayFont, signedPointer, durableClient] = await Promise.all([
   readFile(join(carrierDir, "index.html")),
   readFile(join(carrierDir, "sw.js")),
   readFile(join(repositoryRoot, "packages", "loader", "dist", "bundle", "client.js")),
   readFile(join(repositoryRoot, "packages", "loader", "dist", "bundle", "sw.js")),
-  readFile(join(repositoryRoot, "packages", "loader", "dist", "assets", "rot13.woff"))
+  readFile(join(repositoryRoot, "packages", "loader", "dist", "assets", "rot13.woff")),
+  readFile(pointerPath || join(repositoryRoot, "packages", "integrity", "loader.json")),
+  bundledCarrier ? readFile(join(carrierDir, "client.js")) : Promise.resolve(null)
 ]);
+if (bundledCarrier) {
+  assert.deepEqual(durableClient, clientBundle,
+    "bundled carrier recovery client must match the current loader bundle");
+}
 
 const previousWorker = String.raw`
 const record = (name) => fetch("/upgrade-observation?event=" + encodeURIComponent(name), {
@@ -135,9 +147,7 @@ try {
     }, 250);
   });
 
-  const { YuriRTCClient } = await import(
-    "https://cdn.jsdelivr.net/npm/@edurocks-group/loader@latest/dist/bundle/client.js"
-  );
+  const { YuriRTCClient } = await import("/upgrade-client.js");
   const client = new YuriRTCClient({
     firebase: {
       apiKey: "browser-e2e-public-key",
@@ -145,7 +155,7 @@ try {
       databaseUrl: "https://browser-e2e.invalid"
     },
     cache: {},
-    signal: {}
+    signal: { firestore: { baseUrl: ${JSON.stringify(firestoreBaseUrl)} } }
   }, "/upgrade.html");
   const diagnostics = await client.connect(registration);
   if (!overlapObserved) throw new Error("previous-active/new-installing overlap was not observed");
@@ -155,19 +165,60 @@ try {
   result.textContent = "connected";
 } catch (error) {
   result.dataset.status = "error";
-  result.textContent = String(error && error.stack || error);
+  result.textContent = String(error) + "\n" + String(error?.stack ?? "");
 }
 </script></body></html>`);
 
 const carrierRequests = [];
+const upgradeCarrierRequests = [];
 const upgradeObservations = { attach: 0, wake: 0, ready: 0, bootstrap: 0 };
 let upgradeArmed = false;
 let upgradeV3Responses = 0;
+let localWorkerRequests = 0;
+let externalWorkerRequests = 0;
+const requested = {
+  pointer: 0,
+  client: 0,
+  recoveryClient: 0,
+  worker: 0,
+  font: 0,
+  icons: 0,
+  firestore: 0
+};
+const unexpectedRequests = [];
 
 const server = createServer((request, response) => {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
-  carrierRequests.push(url.pathname);
-  response.setHeader("Cache-Control", "no-store");
+  if (url.pathname === "/yurirtc-e2e/loader.json") {
+    requested.pointer += 1;
+    response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    response.end(signedPointer);
+    return;
+  }
+  if (url.pathname === "/yurirtc-e2e/client.js") {
+    requested.client += 1;
+    response.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
+    response.end(clientBundle);
+    return;
+  }
+  if (url.pathname === "/yurirtc-e2e/rot13.woff") {
+    requested.font += 1;
+    response.writeHead(200, { "Content-Type": "font/woff" });
+    response.end(displayFont);
+    return;
+  }
+  if (url.pathname === "/yurirtc-e2e/icons.css") {
+    requested.icons += 1;
+    response.writeHead(200, { "Content-Type": "text/css; charset=utf-8" });
+    response.end(".material-symbols-rounded{font-family:system-ui}");
+    return;
+  }
+  const isUpgradeHarnessRequest =
+    url.pathname === "/arm-v3" || url.pathname.startsWith("/upgrade");
+  (isUpgradeHarnessRequest ? upgradeCarrierRequests : carrierRequests).push(url.pathname);
+  // Always revalidate the carrier without forcing Firefox to propagate a
+  // no-store cache mode to every fetch made by the transported child frame.
+  response.setHeader("Cache-Control", "no-cache");
   if (url.pathname === "/upgrade.html") {
     response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     response.end(upgradePageHtml);
@@ -181,6 +232,11 @@ const server = createServer((request, response) => {
     }
     upgradeV3Responses += 1;
     response.end(Buffer.concat([Buffer.from(delayedV3WorkerPrefix), workerBundle]));
+    return;
+  }
+  if (url.pathname === "/upgrade-client.js") {
+    response.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
+    response.end(clientBundle);
     return;
   }
   if (url.pathname === "/upgrade-observation" && request.method === "POST") {
@@ -206,6 +262,19 @@ const server = createServer((request, response) => {
     response.end(workerStub);
     return;
   }
+  if (url.pathname === "/client.js" && bundledCarrier) {
+    requested.recoveryClient += 1;
+    response.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
+    response.end(durableClient);
+    return;
+  }
+  if (url.pathname === `/npm/@advwebrec/grainloading@${loaderVersion}/dist/bundle/sw.js`) {
+    localWorkerRequests += 1;
+    requested.worker += 1;
+    response.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
+    response.end(workerBundle);
+    return;
+  }
   if (url.pathname === "/favicon.ico") {
     response.writeHead(204);
     response.end();
@@ -222,17 +291,20 @@ const address = server.address();
 assert.ok(address && typeof address !== "string");
 const origin = `http://127.0.0.1:${address.port}`;
 
-const chromeCandidates = [
-  process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
-  process.env.CHROME_PATH,
-  "/usr/bin/google-chrome-stable",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-  chromium.executablePath()
+const executableCandidates = [
+  process.env.YURIRTC_E2E_EXECUTABLE_PATH,
+  ...(browserName === "chromium" ? [
+    process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    process.env.CHROME_PATH,
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser"
+  ] : []),
+  browserType.executablePath()
 ].filter(Boolean);
 let executablePath;
-for (const candidate of [...new Set(chromeCandidates)]) {
+for (const candidate of [...new Set(executableCandidates)]) {
   try {
     await access(candidate, fsConstants.X_OK);
     executablePath = candidate;
@@ -241,136 +313,61 @@ for (const candidate of [...new Set(chromeCandidates)]) {
     // Try the next installed browser.
   }
 }
-assert.ok(executablePath, "no Chromium executable is available for the browser E2E");
+assert.ok(executablePath, `no ${browserName} executable is available for the browser E2E`);
 
-const browser = await chromium.launch({ executablePath, headless: true });
-const answers = new Map();
-const requested = { client: 0, worker: 0, font: 0, firestore: 0 };
-const unexpectedRequests = [];
-
-const cors = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "content-type",
-  "Access-Control-Allow-Methods": "GET,PATCH,OPTIONS",
-  "Cache-Control": "no-store"
+const launchOptions = {
+  executablePath,
+  headless: true,
+  // A carrier E2E override should leave no external request. Blackhole any
+  // regression through the local server instead of allowing a test to contact
+  // production CDNs or Firebase.
+  proxy: { server: origin, bypass: `127.0.0.1,localhost,${iceHost}` }
 };
+if (browserName === "firefox") {
+  // Firefox deliberately rejects loopback ICE candidates by default. This
+  // test's node and browser share 127.0.0.1; production peers use routable
+  // addresses and do not need either preference.
+  launchOptions.firefoxUserPrefs = {
+    "media.peerconnection.ice.loopback": true,
+    "media.peerconnection.ice.obfuscate_host_addresses": false
+  };
+}
+const browser = await browserType.launch(launchOptions);
 
-const handleRoute = async (route) => {
-  const request = route.request();
+const observeRequest = (request) => {
   const url = new URL(request.url());
-  if (url.origin === origin) {
-    await route.continue();
-    return;
-  }
-
-  const cdn = url.hostname === "cdn.jsdelivr.net" || url.hostname === "unpkg.com";
-  const path = url.pathname.replace(/^\/npm\//, "/");
-  const packagePrefix = "/@edurocks-group/loader@";
-  if (cdn && path === `${packagePrefix}latest/package.json`) {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json; charset=utf-8",
-      headers: cors,
-      body: JSON.stringify({ version: loaderVersion })
-    });
-    return;
-  }
-  if (cdn && path === `${packagePrefix}latest/dist/bundle/client.js`) {
-    requested.client += 1;
-    await route.fulfill({
-      status: 200,
-      contentType: "application/javascript; charset=utf-8",
-      headers: cors,
-      body: clientBundle
-    });
-    return;
-  }
-  // The carrier's stub imports the moving dist-tag directly (deploy/npm/src/sw.js
-  // explains why: the version resolution it used to do relied on
-  // XMLHttpRequest, which does not exist in a worker, so it threw every time and
-  // pinned every carrier to its publish-time loader). Serve the path the stub
-  // actually asks for, not the pinned one it no longer builds.
-  if (cdn && path === `${packagePrefix}latest/dist/bundle/sw.js`) {
-    requested.worker += 1;
-    await route.fulfill({
-      status: 200,
-      contentType: "application/javascript; charset=utf-8",
-      headers: cors,
-      body: workerBundle
-    });
-    return;
-  }
-  if (cdn && path === `${packagePrefix}latest/dist/assets/rot13.woff`) {
-    requested.font += 1;
-    await route.fulfill({
-      status: 200,
-      contentType: "font/woff",
-      headers: cors,
-      body: displayFont
-    });
-    return;
-  }
-
-  if (url.hostname === "firestore.googleapis.com") {
+  if (url.origin === origin) return;
+  const signalBase = new URL(firestoreBaseUrl);
+  if (url.origin === signalBase.origin && url.pathname.startsWith(`${signalBase.pathname}/`)) {
     requested.firestore += 1;
-    const firestorePrefix =
-      "/v1/projects/browser-e2e-project/databases/(default)/documents/signal/";
-    assert.ok(url.pathname.startsWith(firestorePrefix), `unexpected Firestore path: ${url.pathname}`);
-    assert.match(url.pathname.slice(firestorePrefix.length), /^[0-9a-f]{32}$/);
-    assert.deepEqual([...url.searchParams], [["mask.fieldPaths", "answer"]]);
-    if (request.method() === "OPTIONS") {
-      await route.fulfill({ status: 204, headers: cors, body: "" });
-      return;
-    }
-    const key = url.pathname;
-    if (request.method() === "PATCH") {
-      const body = request.postDataJSON();
-      const rawOffer = body?.fields?.offer?.stringValue;
-      assert.equal(typeof rawOffer, "string", "Firestore offer payload is missing");
-      const exchange = await fetch(exchangeUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: rawOffer
-      });
-      const exchangeBody = await exchange.text();
-      assert.equal(exchange.status, 200, `local exchange failed: ${exchangeBody}`);
-      answers.set(key, forceAnswerProtocol(JSON.parse(exchangeBody)));
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json; charset=utf-8",
-        headers: cors,
-        body: JSON.stringify({ fields: {} })
-      });
-      return;
-    }
-    if (request.method() === "GET") {
-      const answer = answers.get(key);
-      assert.ok(answer, "Firestore answer was polled before the local exchange completed");
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json; charset=utf-8",
-        headers: cors,
-        body: JSON.stringify({ fields: { answer: { stringValue: JSON.stringify(answer) } } })
-      });
-      return;
-    }
+    return;
   }
-
-  unexpectedRequests.push(`${request.method()} ${request.url()}`);
-  await route.abort("blockedbyclient");
+  if (
+    (url.hostname === "cdn.jsdelivr.net" || url.hostname === "unpkg.com") &&
+    url.pathname.includes("/dist/bundle/sw.js")
+  ) {
+    externalWorkerRequests += 1;
+  }
+  unexpectedRequests.push(requestLabel(request));
 };
 
 let context;
 try {
   const upgradeContext = await browser.newContext({ serviceWorkers: "allow" });
-  upgradeContext.setDefaultTimeout(90_000);
-  await upgradeContext.route("**/*", handleRoute);
+  upgradeContext.setDefaultTimeout(browserTimeoutMs);
+  upgradeContext.on("request", observeRequest);
   const upgradePage = await upgradeContext.newPage();
   const upgradePageErrors = [];
   const upgradeConsoleErrors = [];
+  const upgradeRequestFailures = [];
   upgradePage.on("pageerror", (error) => upgradePageErrors.push(String(error)));
   upgradePage.on("console", (message) => {
     if (message.type() === "error") upgradeConsoleErrors.push(message.text());
+  });
+  upgradePage.on("requestfailed", (request) => {
+    upgradeRequestFailures.push(
+      `${requestLabel(request)}: ${request.failure()?.errorText ?? "request failed"}`
+    );
   });
 
   let upgradeSummary;
@@ -388,7 +385,12 @@ try {
     assert.equal(
       upgradeOutcome.status,
       "connected",
-      upgradeOutcome.text || "previous-to-current worker upgrade failed without a message"
+      JSON.stringify({
+        message: upgradeOutcome.text || "previous-to-current worker upgrade failed without a message",
+        requestFailures: upgradeRequestFailures,
+        unexpectedRequests,
+        requested
+      })
     );
 
     // A newly-created frame is assigned the replacement active worker, while
@@ -437,20 +439,41 @@ try {
       `the delayed replacement never entered installing: ${upgradeOutcome.lifecycle}`
     );
     assert.ok(
-      !carrierRequests.includes("/upgrade-probe.txt"),
+      !upgradeCarrierRequests.includes("/upgrade-probe.txt"),
       "the v3 probe escaped to the static carrier"
     );
     assert.equal(upgradePageErrors.length, 0, upgradePageErrors.join("\n"));
     assert.equal(upgradeConsoleErrors.length, 0, upgradeConsoleErrors.join("\n"));
     assert.deepEqual(unexpectedRequests, [], "an external upgrade request escaped the E2E mocks");
-    assert.ok(requested.client > 0, "the actual v3 client bundle was not loaded for the upgrade");
+    assert.ok(
+      upgradeCarrierRequests.includes("/upgrade-client.js"),
+      "the actual v3 client bundle was not loaded for the upgrade"
+    );
     assert.ok(requested.firestore >= 2, "the upgraded v3 client did not use real signaling");
+
+    const upgradeRoute = await upgradePage.evaluate(async () => {
+      const state = window.__yurirtcUpgrade;
+      const stats = await state.client.pc.getStats();
+      return {
+        diagnostics: state.diagnostics,
+        candidates: [...stats.values()]
+          .filter((report) => report.type === "local-candidate" || report.type === "remote-candidate")
+          .map((report) => ({
+            id: report.id,
+            type: report.type,
+            protocol: report.protocol,
+            candidateType: report.candidateType,
+            tcpType: report.tcpType
+          }))
+      };
+    });
 
     upgradeSummary = {
       status: "ok",
       lifecycle: upgradeOutcome.lifecycle,
       observations: { ...upgradeObservations },
-      replacementFetches: upgradeV3Responses
+      replacementFetches: upgradeV3Responses,
+      route: upgradeRoute
     };
   } finally {
     await upgradeContext.close();
@@ -458,21 +481,30 @@ try {
 
   // The existing large-transfer scenario stays a clean first-install run in a
   // separate browser profile, so upgrade state cannot weaken its assertions.
-  answers.clear();
-  Object.assign(requested, { client: 0, worker: 0, font: 0, firestore: 0 });
+  Object.assign(requested, {
+    pointer: 0,
+    client: 0,
+    recoveryClient: 0,
+    worker: 0,
+    font: 0,
+    icons: 0,
+    firestore: 0
+  });
   unexpectedRequests.length = 0;
   carrierRequests.length = 0;
 
   context = await browser.newContext({ serviceWorkers: "allow" });
-  context.setDefaultTimeout(90_000);
-  await context.route("**/*", handleRoute);
+  context.setDefaultTimeout(browserTimeoutMs);
+  context.on("request", observeRequest);
   const page = await context.newPage();
   const pageErrors = [];
   const consoleErrors = [];
+  const consoleDiagnostics = [];
   const httpErrors = [];
   page.on("pageerror", (error) => pageErrors.push(String(error)));
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
+    if (message.type() === "warning") consoleDiagnostics.push(message.text());
   });
   page.on("response", (response) => {
     if (response.status() >= 400) httpErrors.push(`${response.status()} ${response.url()}`);
@@ -480,13 +512,115 @@ try {
 
   await page.goto(`${origin}/index.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => document.title === "learnmathedu");
-  const frameElement = await page.waitForSelector("iframe");
+  let frameElement;
+  try {
+    frameElement = await page.waitForSelector("iframe");
+  } catch (error) {
+    const snapshot = await page.locator("body").innerText().catch(() => "<unreadable>");
+    const loaderError = await page.locator("[data-yurirtc-loader-error]").evaluate((element, expected) => ({
+      error: element.dataset.yurirtcLoaderError,
+      stage: element.dataset.yurirtcLoaderIntegrityStage,
+      reason: element.dataset.yurirtcLoaderIntegrityReason,
+      secure: window.isSecureContext,
+      subtle: Boolean(window.crypto?.subtle),
+      keyMatches: document.documentElement.dataset.yurirtcTestManifestPublicKey === expected.key,
+      manifestMatches: element.dataset.yurirtcLoaderManifestFingerprint === expected.fingerprint
+    }), {
+      key: manifestPublicKey,
+      fingerprint: createHash("sha256").update(signedPointer).digest("base64url")
+    }).catch(() => undefined);
+    const directSignatureCheck = await page.evaluate(async ({ pointerText, expectedKey }) => {
+      const decode = (value) => {
+        const padded = value.replace(/-/g, "+").replace(/_/g, "/") +
+          "===".slice((value.length + 3) % 4);
+        return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+      };
+      const envelope = JSON.parse(pointerText);
+      const key = await crypto.subtle.importKey(
+        "spki",
+        decode(expectedKey),
+        { name: "ECDSA", namedCurve: "P-256" },
+        false,
+        ["verify"]
+      );
+      return crypto.subtle.verify(
+        { name: "ECDSA", hash: "SHA-256" },
+        key,
+        decode(envelope.signature.value),
+        decode(envelope.payload)
+      );
+    }, {
+      pointerText: signedPointer.toString("utf8"),
+      expectedKey: manifestPublicKey
+    }).catch(() => undefined);
+    throw new Error(`loader did not mount its frame: ${JSON.stringify({
+      snapshot,
+      loaderError,
+      directSignatureCheck,
+      pageErrors,
+      consoleErrors,
+      consoleDiagnostics,
+      httpErrors,
+      requested,
+      unexpectedRequests,
+      carrierRequests
+    })}`, { cause: error });
+  }
   const frame = await frameElement.contentFrame();
   assert.ok(frame, "the real loader did not mount its transported application frame");
   await frame.waitForFunction(() => {
     const result = document.querySelector("#result");
-    return result?.dataset.phase === "upload";
+    return result?.dataset.phase === "cache-ready" || result?.dataset.status === "error";
   }, undefined, { timeout: 120_000 });
+  const cacheReady = await frame.locator("#result").evaluate((element) => ({
+    status: element.dataset.status,
+    phase: element.dataset.phase,
+    failurePhase: element.dataset.failurePhase,
+    text: element.textContent
+  }));
+  assert.notEqual(cacheReady.status, "error", cacheReady.text || "fixture failed before cache check");
+
+  // No request routing is installed in this context, because Playwright turns
+  // off the browser HTTP cache whenever any route handler exists.
+  await frame.evaluate(() => dispatchEvent(new Event("yurirtc-cache-e2e-start")));
+  await frame.waitForFunction(() => {
+    const result = document.querySelector("#result");
+    return result?.dataset.phase === "cache-complete" || result?.dataset.status === "error";
+  }, undefined, { timeout: 120_000 });
+  const cachePhase = await frame.locator("#result").evaluate((element) => ({
+    status: element.dataset.status,
+    phase: element.dataset.phase,
+    failurePhase: element.dataset.failurePhase,
+    text: element.textContent
+  }));
+  assert.notEqual(
+    cachePhase.status,
+    "error",
+    `transport fixture failed during ${cachePhase.failurePhase ?? cachePhase.phase}: ${cachePhase.text}`
+  );
+  await frame.evaluate(() => dispatchEvent(new Event("yurirtc-cache-e2e-finish")));
+  await frame.waitForFunction(() => {
+    const result = document.querySelector("#result");
+    return result?.dataset.phase === "upload" || result?.dataset.status === "error";
+  }, undefined, { timeout: 120_000 });
+  const firstPhase = await frame.locator("#result").evaluate((element) => ({
+    status: element.dataset.status,
+    phase: element.dataset.phase,
+    failurePhase: element.dataset.failurePhase,
+    text: element.textContent
+  }));
+  assert.notEqual(
+    firstPhase.status,
+    "error",
+    `transport fixture failed: ${JSON.stringify({
+      phase: firstPhase.failurePhase ?? firstPhase.phase,
+      text: firstPhase.text,
+      consoleDiagnostics,
+      pageErrors,
+      consoleErrors,
+      httpErrors
+    })}`
+  );
 
   // Connect another real loader tab while the incumbent has a paced upload in
   // flight. The second tab must become standby, load its own transported app
@@ -504,9 +638,50 @@ try {
   });
   await secondPage.goto(`${origin}/index.html`, { waitUntil: "domcontentloaded" });
   await secondPage.waitForFunction(() => document.title === "learnmathedu");
-  const secondFrameElement = await secondPage.waitForSelector("iframe");
+  let secondFrameElement;
+  try {
+    secondFrameElement = await secondPage.waitForSelector("iframe");
+  } catch (error) {
+    const snapshot = await secondPage.locator("body").innerText().catch(() => "<unreadable>");
+    const state = await secondPage.locator("[data-yurirtc-loader-error], [data-yurirtc-network]")
+      .evaluateAll((elements) => elements.map((element) => ({ ...element.dataset })))
+      .catch(() => []);
+    throw new Error(`standby loader did not mount its frame: ${JSON.stringify({
+      snapshot,
+      state,
+      pageErrors,
+      consoleErrors,
+      consoleDiagnostics,
+      httpErrors,
+      requested,
+      unexpectedRequests,
+      carrierRequests
+    })}`, { cause: error });
+  }
   const secondFrame = await secondFrameElement.contentFrame();
   assert.ok(secondFrame, "the standby tab did not mount its transported application frame");
+
+  // The first backend upload response is held until the transported standby
+  // document exists. This keeps buffered Firefox/WebKit uploads in the same
+  // deterministic overlap as Chromium's streaming upload without relaxing
+  // the streaming receive-span assertion.
+  await secondFrame.waitForSelector("#result", { timeout: 120_000 });
+  const overlap = await frame.locator("#result").evaluate((element) => ({
+    status: element.dataset.status,
+    phase: element.dataset.phase,
+    text: element.textContent
+  }));
+  assert.equal(overlap.status, "running", overlap.text || "the first upload completed before standby mounted");
+  assert.equal(overlap.phase, "upload", `the first tab left upload during standby mount: ${overlap.phase}`);
+  const gateRelease = await secondFrame.evaluate(async () => {
+    const response = await fetch("/apiv2/release-upload-gate", { method: "POST" });
+    return { status: response.status, text: await response.text() };
+  });
+  assert.equal(
+    gateRelease.status,
+    204,
+    gateRelease.text || "the mounted standby frame could not release the first upload"
+  );
 
   await Promise.all([frame, secondFrame].map((candidate) => candidate.waitForFunction(() => {
     const result = document.querySelector("#result");
@@ -535,7 +710,11 @@ try {
     (element) => element.dataset.yurirtcNetworkTier?.split("-")[0] ?? "unknown"
   );
   if (forcedProtocol !== "all") {
-    assert.equal(selectedProtocol, forcedProtocol, "browser selected the wrong ICE transport");
+    assert.equal(
+      selectedProtocol,
+      forcedProtocol,
+      `browser selected the wrong ICE transport: ${JSON.stringify(upgradeSummary?.route)}`
+    );
   }
 
   assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
@@ -544,22 +723,76 @@ try {
     0,
     JSON.stringify({ consoleErrors, httpErrors })
   );
-  assert.ok(requested.client >= 2, "both real loader tabs did not request the client bundle");
-  assert.ok(requested.worker > 0, "the real worker bundle was not requested");
-  assert.ok(requested.font > 0, "the real display font was not requested");
+  if (bundledCarrier) {
+    const durableModule = await page.evaluate(async (url) => {
+      const loaded = await import(url);
+      return {
+        client: typeof loaded.YuriRTCClient,
+        legacyClient: typeof loaded.LoaderClient,
+        boot: typeof loaded.boot
+      };
+    }, `${origin}/client.js`);
+    assert.deepEqual(durableModule, {
+      client: "function",
+      legacyClient: "function",
+      boot: "function"
+    }, "the bundled same-origin recovery module lost its loader exports");
+    assert.equal(requested.client, 0, "bundled carrier fetched the resolver client fixture");
+    assert.equal(requested.pointer, 0, "bundled carrier fetched the signed CDN pointer");
+    assert.equal(requested.worker, 0, "bundled carrier fetched the CDN worker route");
+    assert.equal(requested.font, 0, "bundled carrier fetched the loader font route");
+    assert.ok(requested.recoveryClient > 0,
+      "transported documents did not use the durable same-origin recovery client");
+    const persisted = await page.evaluate(() => new Promise((resolve, reject) => {
+      const opened = indexedDB.open("edurocks-loader-config", 1);
+      opened.onerror = () => reject(opened.error ?? new Error("bootstrap database open failed"));
+      opened.onsuccess = () => {
+        const database = opened.result;
+        const request = database.transaction("config", "readonly").objectStore("config").get("current");
+        request.onerror = () => reject(request.error ?? new Error("bootstrap read failed"));
+        request.onsuccess = () => {
+          database.close();
+          resolve(request.result);
+        };
+      };
+    }));
+    assert.equal(
+      persisted?.clientUrls?.[0],
+      `${origin}/client.js`,
+      "bundled recovery did not persist its same-origin client ahead of blob/CDN sources"
+    );
+  } else {
+    assert.ok(requested.client >= 2, "both real loader tabs did not request the client bundle");
+    assert.ok(requested.pointer >= 2, "both real loader tabs did not request the signed pointer");
+    assert.ok(requested.worker > 0, "the real worker bundle was not requested");
+    assert.equal(requested.recoveryClient, 0, "CDN carrier requested the bundled recovery client");
+    assert.ok(
+      carrierRequests.includes(`/npm/@advwebrec/grainloading@${loaderVersion}/dist/bundle/sw.js`),
+      "the deterministic same-origin worker bundle was not requested"
+    );
+    assert.ok(requested.font > 0, "the real display font was not requested");
+  }
+  assert.equal(externalWorkerRequests, 0, "the browser E2E worker escaped to a production CDN");
+  assert.ok(requested.icons > 0, "the hosted Material Symbols stylesheet was not requested");
   assert.ok(requested.firestore >= 4, "both real loader tabs did not exchange signaling offers");
   assert.deepEqual(unexpectedRequests, [], "an external request escaped the deterministic E2E mocks");
   assert.ok(carrierRequests.includes("/index.html"), "the generated carrier was not served");
   assert.ok(carrierRequests.includes("/sw.js"), "the generated worker stub was not served");
   assert.ok(
     carrierRequests.every((path) =>
-      path === "/index.html" || path === "/sw.js" || path === "/favicon.ico"
+      path === "/index.html" ||
+      path === "/sw.js" ||
+      (bundledCarrier && path === "/client.js") ||
+      path === "/favicon.ico" ||
+      path === `/npm/@advwebrec/grainloading@${loaderVersion}/dist/bundle/sw.js`
     ),
     `application traffic escaped the service worker: ${JSON.stringify(carrierRequests)}`
   );
 
   process.stdout.write(JSON.stringify({
     status: "ok",
+    browserName,
+    carrierVariant,
     title: await page.title(),
     forcedProtocol,
     selectedProtocol,
