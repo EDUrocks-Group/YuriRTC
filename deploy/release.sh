@@ -123,20 +123,26 @@ require_live_latest() {
   fi
 }
 
-stage_listing_has_entries() {
+stage_listing_has_version() {
+  local expected_version="$1"
   node -e '
+    const expected = process.argv[1];
     let input = "";
     process.stdin.on("data", (chunk) => { input += chunk; });
     process.stdin.on("end", () => {
       const value = JSON.parse(input);
-      const count = Array.isArray(value)
-        ? value.length
-        : value && typeof value === "object"
-          ? Object.keys(value).length
-          : 0;
-      process.exit(count > 0 ? 0 : 1);
+      const containsVersion = (entry) => {
+        if (entry === expected) return true;
+        if (typeof entry === "string" && entry.endsWith(`@${expected}`)) return true;
+        if (Array.isArray(entry)) return entry.some(containsVersion);
+        if (entry && typeof entry === "object") {
+          return Object.values(entry).some(containsVersion);
+        }
+        return false;
+      };
+      process.exit(containsVersion(value) ? 0 : 1);
     });
-  '
+  ' "$expected_version"
 }
 
 stage_and_pause() {
@@ -147,8 +153,8 @@ stage_and_pause() {
   local sign_pointer="$5"
   local listing
 
-  listing="$(npm_stage_for_token "$token" stage list "$name@$version" --json)"
-  if ! stage_listing_has_entries <<<"$listing"; then
+  listing="$(npm_stage_for_token "$token" stage list "$name" --json)"
+  if ! stage_listing_has_version "$version" <<<"$listing"; then
     echo "staging $name@$version for required human 2FA approval"
     if [[ "$sign_pointer" == "1" ]]; then
       (
@@ -164,8 +170,8 @@ stage_and_pause() {
           npx --yes "npm@$NPM_STAGE_VERSION" stage publish . --access public
       )
     fi
-    listing="$(npm_stage_for_token "$token" stage list "$name@$version" --json)"
-    if ! stage_listing_has_entries <<<"$listing"; then
+    listing="$(npm_stage_for_token "$token" stage list "$name" --json)"
+    if ! stage_listing_has_version "$version" <<<"$listing"; then
       echo "npm accepted the stage command but did not list $name@$version" >&2
       exit 1
     fi
@@ -279,8 +285,8 @@ done
 echo "verified live loader $LOADER_NAME@$LOADER_VERSION on npm, jsDelivr, and unpkg"
 
 if ! version_exists "$POINTER_NAME" "$POINTER_VERSION"; then
-  pointer_listing="$(npm_stage_for_token "$NPM_INTEGRITY_TOKEN" stage list "$POINTER_NAME@$POINTER_VERSION" --json)"
-  if ! stage_listing_has_entries <<<"$pointer_listing"; then
+  pointer_listing="$(npm_stage_for_token "$NPM_INTEGRITY_TOKEN" stage list "$POINTER_NAME" --json)"
+  if ! stage_listing_has_version "$POINTER_VERSION" <<<"$pointer_listing"; then
     # Sign only after every immutable loader runtime asset is live on both CDNs.
     YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY="$YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY" \
       npm run build -w "$POINTER_NAME"

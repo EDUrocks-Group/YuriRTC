@@ -47,6 +47,8 @@ test("npm release is staged, source-pinned, credential-scoped, and canaried", as
   const release = await repositoryFile("deploy/release.sh");
   assert.doesNotMatch(release, /(?:^|\n)\s*(?:npm|npm_for_token[^\n]*)\s+publish\b/m);
   assert.match(release, /npm@\$NPM_STAGE_VERSION" stage publish/);
+  assert.doesNotMatch(release, /stage list "\$name@\$version"/);
+  assert.match(release, /stage_listing_has_version/);
   assert.match(release, /private_file "\$ENV_FILE"/);
   assert.match(release, /private_file "\$AUTH_CONFIG"/);
   assert.match(release, /git status --porcelain --untracked-files=normal/);
