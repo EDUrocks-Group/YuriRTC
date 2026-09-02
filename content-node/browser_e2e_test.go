@@ -122,6 +122,30 @@ func TestBrowserV3EndToEnd(t *testing.T) {
 		t.Fatalf("write mutable cache fixture: %v", err)
 	}
 
+	// These paths mirror two production regressions: Unity build manifests use
+	// escaped spaces, and EDUrocks 5 cover art lives deeper than the old gn/<id>
+	// convention. The browser fixture exercises both through the real worker.
+	unityPath := filepath.Join(root, "Build", "GunSpin WebGL FinalVersion.json")
+	if err := os.MkdirAll(filepath.Dir(unityPath), 0o700); err != nil {
+		t.Fatalf("create Unity fixture directory: %v", err)
+	}
+	if err := os.WriteFile(unityPath, []byte(`{"companyName":"GunSpin fixture"}`), 0o600); err != nil {
+		t.Fatalf("write Unity manifest fixture: %v", err)
+	}
+	coverBytes, err := base64.StdEncoding.DecodeString(
+		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+	)
+	if err != nil {
+		t.Fatalf("decode cover fixture: %v", err)
+	}
+	coverPath := filepath.Join(root, "filestorage", "logn", "zones", "91", "cover.png")
+	if err := os.MkdirAll(filepath.Dir(coverPath), 0o700); err != nil {
+		t.Fatalf("create cover fixture directory: %v", err)
+	}
+	if err := os.WriteFile(coverPath, coverBytes, 0o600); err != nil {
+		t.Fatalf("write cover fixture: %v", err)
+	}
+
 	const (
 		uploadChunks     = 64
 		uploadChunkBytes = 64 * 1024
@@ -178,6 +202,32 @@ try {
     const startCacheCheck = harnessGate("yurirtc-cache-e2e-start");
     result.dataset.phase = "cache-ready";
     await startCacheCheck;
+    const unity = await fetch("/Build/GunSpin%%20WebGL%%20FinalVersion.json").then(async (response) => {
+      if (!response.ok) throw new Error("escaped Unity manifest status " + response.status);
+      return response.json();
+    });
+    if (unity.companyName !== "GunSpin fixture") throw new Error("escaped Unity manifest changed");
+
+    const coverUrl = new URL("/filestorage/logn/zones/91/cover.png", location.href).href;
+    const loadCover = () => new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = resolve;
+      image.onerror = () => reject(new Error("cover image failed to load"));
+      image.src = coverUrl;
+    });
+    await loadCover();
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      if (await caches.match(coverUrl)) break;
+      if (attempt === 299) throw new Error("cover image was not committed to persistent cache");
+      await delay(10);
+    }
+    const removeCover = await fetch("/apiv2/remove-cover-fixture", { method: "POST" });
+    if (!removeCover.ok) throw new Error("cover removal status " + removeCover.status);
+    // With the source absent, success proves this second browser image request
+    // used CacheStorage rather than re-fetching it over YuriRTC.
+    await loadCover();
+    const restoreCover = await fetch("/apiv2/restore-cover-fixture", { method: "POST" });
+    if (!restoreCover.ok) throw new Error("cover restore status " + restoreCover.status);
     const mutableUrl = new URL("/mutable.txt", location.href).href;
     const initialResponse = await fetch(mutableUrl);
     const initial = await initialResponse.text();
@@ -348,6 +398,22 @@ try {
 		return uploadGate
 	}
 	backend := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/remove-cover-fixture" && request.Method == http.MethodPost {
+			if err := os.Remove(coverPath); err != nil && !os.IsNotExist(err) {
+				http.Error(response, "remove cover fixture", http.StatusInternalServerError)
+				return
+			}
+			response.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if request.URL.Path == "/restore-cover-fixture" && request.Method == http.MethodPost {
+			if err := os.WriteFile(coverPath, coverBytes, 0o600); err != nil {
+				http.Error(response, "restore cover fixture", http.StatusInternalServerError)
+				return
+			}
+			response.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if request.URL.Path == "/mutate-cache-fixture" && request.Method == http.MethodPost {
 			if err := os.WriteFile(mutablePath, []byte(mutableUpdated), 0o600); err != nil {
 				http.Error(response, "mutate cache fixture", http.StatusInternalServerError)
@@ -516,6 +582,10 @@ try {
 					http.Error(response, "invalid offer", http.StatusBadRequest)
 					return
 				}
+				if len(offer.Candidates) != 0 {
+					http.Error(response, "offer duplicated in-SDP candidates", http.StatusBadRequest)
+					return
+				}
 				signalMu.Lock()
 				protocol := signalProtocol
 				signalMu.Unlock()
@@ -528,6 +598,10 @@ try {
 				answer, err := answerOffer(request.Context(), rtc.API, handler, registry, offer)
 				if err != nil {
 					http.Error(response, "answer failed", http.StatusInternalServerError)
+					return
+				}
+				if len(answer.Candidates) != 0 {
+					http.Error(response, "answer duplicated in-SDP candidates", http.StatusInternalServerError)
 					return
 				}
 				if err := validateBrowserE2EAnswerProtocol(answer, protocol); err != nil {
@@ -642,6 +716,9 @@ try {
 							resetUploadGate()
 							if err := os.WriteFile(mutablePath, []byte(mutableInitial), 0o600); err != nil {
 								t.Fatalf("reset mutable cache fixture: %v", err)
+							}
+							if err := os.WriteFile(coverPath, coverBytes, 0o600); err != nil {
+								t.Fatalf("reset cover cache fixture: %v", err)
 							}
 							commandContext, cancelCommand := context.WithTimeout(t.Context(), 5*time.Minute)
 							defer cancelCommand()

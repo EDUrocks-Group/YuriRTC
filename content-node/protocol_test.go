@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -626,6 +627,15 @@ func TestResolveRefusesTraversal(t *testing.T) {
 	if err != nil || ok != "/srv/root/a/app.js" {
 		t.Fatalf("legitimate path broke: %s %v", ok, err)
 	}
+	unity, err := h.resolve("/Build/GunSpin%20WebGL%20FinalVersion.json")
+	if err != nil || unity != "/srv/root/Build/GunSpin WebGL FinalVersion.json" {
+		t.Fatalf("escaped Unity filename broke: %s %v", unity, err)
+	}
+	for _, malformed := range []string{"/%", "/asset%00.json"} {
+		if resolved, err := h.resolve(malformed); err == nil {
+			t.Fatalf("malformed path %q resolved to %q", malformed, resolved)
+		}
+	}
 }
 
 // A raced offer arrives on both legs. Answering twice would open two peer
@@ -645,6 +655,35 @@ func TestDedupeClaimsOnce(t *testing.T) {
 	}
 	if _, leader := d.Join("session-b"); !leader {
 		t.Fatal("a different session must still be claimable")
+	}
+}
+
+func TestSignalCleanupRescheduleCancelsPriorDelete(t *testing.T) {
+	sig := &Signaler{cleanupTimers: make(map[string]*time.Timer)}
+	var calls atomic.Int32
+	var firstRan atomic.Bool
+	done := make(chan struct{})
+	sig.scheduleCleanup("firestore:one", 40*time.Millisecond, func() {
+		firstRan.Store(true)
+		calls.Add(1)
+	})
+	sig.scheduleCleanup("firestore:one", 0, func() {
+		calls.Add(1)
+		close(done)
+	})
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("replacement cleanup timer did not run")
+	}
+	time.Sleep(60 * time.Millisecond)
+	if firstRan.Load() || calls.Load() != 1 {
+		t.Fatalf("cleanup calls=%d firstRan=%v, want one replacement", calls.Load(), firstRan.Load())
+	}
+	sig.cleanupMu.Lock()
+	defer sig.cleanupMu.Unlock()
+	if len(sig.cleanupTimers) != 0 {
+		t.Fatalf("completed cleanup retained timer state: %v", sig.cleanupTimers)
 	}
 }
 

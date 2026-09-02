@@ -85,7 +85,36 @@ export function classifyRequest(request: {
   if (request.mode === "navigate" || request.destination === "document") {
     return { kind: "route", policy: POLICY.route, cacheable: true };
   }
-  return classify(pathname);
+
+  const pathClassification = classify(pathname);
+  // API responses remain private/dynamic regardless of Fetch destination, and
+  // content-hashed shell files keep their stronger immutable policy.
+  if (pathClassification.kind === "api" || pathClassification.kind === "shell") {
+    return pathClassification;
+  }
+
+  // A transported site can organise thumbnails however it wants. EDUrocks 5,
+  // for example, uses logn/zones/<id>/cover.png and gd/<id>/image.png rather
+  // than the old two-segment gn convention. Fetch metadata identifies their
+  // actual role without baking either site's directory layout into YuriRTC.
+  // Full game payloads requested with fetch/XHR keep the payload/no-cache rule.
+  if (request.destination === "image") {
+    return { kind: "cover", policy: POLICY.cover, cacheable: true };
+  }
+  if (
+    request.destination === "script" ||
+    request.destination === "style" ||
+    request.destination === "font" ||
+    request.destination === "worker" ||
+    request.destination === "sharedworker" ||
+    request.destination === "serviceworker"
+  ) {
+    // These are reusable static representations even when a hosted site's
+    // directory happens to be named filestorage. Keep validators authoritative
+    // rather than assuming arbitrary third-party filenames are immutable.
+    return { kind: "other", policy: POLICY.other, cacheable: true };
+  }
+  return pathClassification;
 }
 
 /**

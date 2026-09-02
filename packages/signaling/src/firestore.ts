@@ -32,7 +32,7 @@ export interface FirestoreConfig {
   firstPollMs?: number;
   /** Initial interval between subsequent polls. Every poll is a billed read. */
   pollIntervalMs?: number;
-  /** Ceiling for exponential poll backoff (defaults to 1600ms). */
+  /** Ceiling for exponential poll backoff (defaults to 3200ms). */
   maxPollIntervalMs?: number;
   timeoutMs?: number;
   /** How long the document should live if the node never reaps it. */
@@ -47,10 +47,10 @@ export class FirestoreBackend implements SignalBackend {
   constructor(private readonly config: FirestoreConfig) {}
 
   async exchange(offer: OfferBlob, signal: AbortSignal): Promise<AnswerBlob> {
-    const firstPoll = this.config.firstPollMs ?? 600;
-    const interval = this.config.pollIntervalMs ?? 400;
-    const maxInterval = Math.max(interval, this.config.maxPollIntervalMs ?? 1_600);
-    const timeout = this.config.timeoutMs ?? 15_000;
+    const firstPoll = this.config.firstPollMs ?? 1_000;
+    const interval = this.config.pollIntervalMs ?? 800;
+    const maxInterval = Math.max(interval, this.config.maxPollIntervalMs ?? 3_200);
+    const timeout = this.config.timeoutMs ?? 8_000;
     const ttl = this.config.ttlSeconds ?? 300;
 
     const combined = anySignal([signal, AbortSignal.timeout(timeout)]);

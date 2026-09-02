@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classify, isRanged, requestPriority } from "../src/routing.js";
+import { classify, classifyRequest, isRanged, requestPriority } from "../src/routing.js";
 import { RequestPriority } from "@yurirtc/protocol";
 import { parseSetCookie, isExpired } from "../src/session.js";
 import { needsIsolation, withIsolationHeaders } from "../src/coi.js";
@@ -56,6 +56,55 @@ test("covers and launchers are cached, payloads are not", () => {
 test("payloads are never cacheable regardless of extension", () => {
   assert.equal(classify("/filestorage/gd/cover-looking.png").cacheable, false);
   assert.equal(classify("/filestorage/gn/1/nested.png").cacheable, false);
+});
+
+test("browser image requests use the persistent bounded cache at any site path", () => {
+  for (const path of [
+    "/filestorage/logn/zones/91/cover.png",
+    "/filestorage/gd/42/image.png",
+    "/custom/catalog/thumb.webp"
+  ]) {
+    const result = classifyRequest({
+      url: `https://site.invalid${path}`,
+      destination: "image"
+    });
+    assert.equal(result.kind, "cover", path);
+    assert.equal(result.policy, "cache-first-lru", path);
+    assert.equal(result.cacheable, true, path);
+  }
+  assert.equal(
+    classifyRequest({
+      url: "https://site.invalid/filestorage/gn/91/game.data",
+      destination: ""
+    }).cacheable,
+    false,
+    "XHR/fetch game payloads must not be duplicated in CacheStorage"
+  );
+  assert.equal(
+    classifyRequest({
+      url: "https://site.invalid/apiv2/avatar",
+      destination: "image"
+    }).cacheable,
+    false,
+    "API images must not become shared static cache entries"
+  );
+});
+
+test("nested game code and fonts use universal validator-backed caching", () => {
+  for (const [path, destination] of [
+    ["/filestorage/gn/91/UnityLoader.js", "script"],
+    ["/filestorage/gn/91/game.css", "style"],
+    ["/games/assets/ui.woff2", "font"],
+    ["/games/runtime-worker.js", "worker"]
+  ] as const) {
+    const result = classifyRequest({
+      url: `https://site.invalid${path}`,
+      destination
+    });
+    assert.equal(result.kind, "other", path);
+    assert.equal(result.policy, "revalidate-lru", path);
+    assert.equal(result.cacheable, true, path);
+  }
 });
 
 test("arbitrary static sites use bounded validator-backed caching", () => {

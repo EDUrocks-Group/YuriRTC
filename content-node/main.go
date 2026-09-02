@@ -510,25 +510,6 @@ func answerOffer(ctx context.Context, api *webrtc.API, handler *Handler, peers *
 		return AnswerBlob{}, err
 	}
 
-	// Collect candidates as they are gathered. Registered before
-	// SetLocalDescription, which is what starts gathering.
-	var candidateMu sync.Mutex
-	// Three ports over UDP+TCP currently produce twelve SDP candidates because
-	// Pion emits component aliases. Pre-size the burst hot path accordingly.
-	candidates := make([]json.RawMessage, 0, 12)
-	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c == nil {
-			return
-		}
-		encoded, err := json.Marshal(c.ToJSON())
-		if err != nil {
-			return
-		}
-		candidateMu.Lock()
-		candidates = append(candidates, encoded)
-		candidateMu.Unlock()
-	})
-
 	gathered := webrtc.GatheringCompletePromise(pc)
 	if err := pc.SetLocalDescription(answer); err != nil {
 		closePeer()
@@ -554,13 +535,10 @@ func answerOffer(ctx context.Context, api *webrtc.API, handler *Handler, peers *
 		return AnswerBlob{}, errNoLocalDescription
 	}
 
-	// Candidates travel inside the SDP for non-trickle, but the client applies
-	// the explicit list too, so send both.
-	candidateMu.Lock()
-	out := append([]json.RawMessage(nil), candidates...)
-	candidateMu.Unlock()
-
-	return AnswerBlob{SDP: local.SDP, Candidates: out}, nil
+	// Non-trickle candidates are already embedded in LocalDescription.SDP.
+	// Keeping the legacy array present but empty is backward compatible while
+	// avoiding a second copy in both Firebase documents and browser downloads.
+	return AnswerBlob{SDP: local.SDP, Candidates: []json.RawMessage{}}, nil
 }
 
 // selectedRemoteAddress reports the visitor's address from the nominated ICE

@@ -136,8 +136,8 @@ type Signaler struct {
 	dedupe     *Dedupe
 	answer     AnswerFunc
 
-	mu        sync.Mutex
-	firstSeen map[string]time.Time
+	cleanupMu     sync.Mutex
+	cleanupTimers map[string]*time.Timer
 }
 
 func NewSignaler(ctx context.Context, app *firebase.App, databaseURL string, streamHTTP *http.Client, answer AnswerFunc) (*Signaler, error) {
@@ -162,16 +162,15 @@ func NewSignaler(ctx context.Context, app *firebase.App, databaseURL string, str
 		// Both answer documents are removed after 30 seconds. Two minutes is
 		// ample for a delayed racing leg while avoiding retention of SDP and
 		// candidate blobs for the lifetime of long-lived peer connections.
-		dedupe:    NewDedupe(2 * time.Minute),
-		answer:    answer,
-		firstSeen: make(map[string]time.Time),
+		dedupe:        NewDedupe(2 * time.Minute),
+		answer:        answer,
+		cleanupTimers: make(map[string]*time.Timer),
 	}, nil
 }
 
 func (s *Signaler) Run(ctx context.Context) {
 	go s.watchRTDB(ctx)
 	go s.watchFirestore(ctx)
-	go s.sweep(ctx)
 }
 
 // RTDB leg. One authenticated REST SSE connection replaces the former 500ms
@@ -215,15 +214,23 @@ func (s *Signaler) handleRTDBOffer(ctx context.Context, event RTDBOfferEvent) {
 	removeRTDB := func() {
 		_ = s.rtdb.NewRef("signal/" + uid).Delete(context.Background())
 	}
+	cleanupKey := "rtdb:" + uid
+	discardRTDB := func() {
+		s.scheduleCleanup(cleanupKey, 0, removeRTDB)
+	}
+	// Every observed offer owns its cleanup timer. This replaces a permanent
+	// shallow tree listing every five minutes: idle nodes now perform no RTDB
+	// cleanup reads, while a client which disappears is still reaped promptly.
+	s.scheduleCleanup(cleanupKey, time.Minute, removeRTDB)
 	go s.handle(ctx, "rtdb", event.Offer, func(answer AnswerBlob) error {
 		if err := s.rtdb.NewRef("signal/"+uid+"/answer").Set(ctx, answer); err != nil {
 			return err
 		}
 		// Delete after answering. Abandoned offers are small but they
 		// accumulate against the 1GB cap and slow the initial sync.
-		time.AfterFunc(30*time.Second, removeRTDB)
+		s.scheduleCleanup(cleanupKey, 30*time.Second, removeRTDB)
 		return nil
-	}, removeRTDB)
+	}, discardRTDB)
 }
 
 // Firestore leg. Unlike RTDB, the admin SDK talks gRPC and gets a real snapshot
@@ -248,30 +255,39 @@ func (s *Signaler) watchFirestore(ctx context.Context) {
 					continue
 				}
 				doc := change.Doc
+				ref := doc.Ref
+				removeDoc := func() {
+					_, _ = ref.Delete(context.Background())
+				}
+				cleanupKey := "firestore:" + ref.Path
+				discardDoc := func() {
+					s.scheduleCleanup(cleanupKey, 0, removeDoc)
+				}
 				// Replacing the offer with the answer emits one modified snapshot.
 				// Check this before validating offer so that completed documents are
 				// ignored rather than mistaken for malformed input and deleted before
 				// the browser can collect them.
 				if _, err := doc.DataAt("answer"); err == nil {
+					s.scheduleCleanup(cleanupKey, 30*time.Second, removeDoc)
 					continue
 				}
-				ref := doc.Ref
-				removeDoc := func() {
-					_, _ = ref.Delete(context.Background())
-				}
+				// A creation event is also enough to schedule abandoned-offer
+				// cleanup. Native Firestore TTL remains a final backstop, but the
+				// node no longer runs a billed collection query on a fixed timer.
+				s.scheduleCleanup(cleanupKey, 5*time.Minute, removeDoc)
 				raw, err := doc.DataAt("offer")
 				if err != nil {
-					go removeDoc()
+					discardDoc()
 					continue
 				}
 				text, ok := raw.(string)
 				if !ok {
-					go removeDoc()
+					discardDoc()
 					continue
 				}
 				var offer OfferBlob
 				if err := json.Unmarshal([]byte(text), &offer); err != nil {
-					go removeDoc()
+					discardDoc()
 					continue
 				}
 				go s.handle(ctx, "firestore", offer, func(answer AnswerBlob) error {
@@ -285,13 +301,38 @@ func (s *Signaler) watchFirestore(ctx context.Context) {
 					if _, err := ref.Set(ctx, fields); err != nil {
 						return err
 					}
-					time.AfterFunc(30*time.Second, removeDoc)
+					s.scheduleCleanup(cleanupKey, 30*time.Second, removeDoc)
 					return nil
-				}, removeDoc)
+				}, discardDoc)
 			}
 		}
 		snapshots.Stop()
 	}
+}
+
+// scheduleCleanup keeps at most one timer per signaling record. A later answer
+// shortens the offer watchdog rather than creating a second billed delete.
+func (s *Signaler) scheduleCleanup(key string, after time.Duration, remove func()) {
+	s.cleanupMu.Lock()
+	if prior := s.cleanupTimers[key]; prior != nil {
+		prior.Stop()
+	}
+	var timer *time.Timer
+	timer = time.AfterFunc(after, func() {
+		s.cleanupMu.Lock()
+		current := s.cleanupTimers[key] == timer
+		if current {
+			delete(s.cleanupTimers, key)
+		}
+		s.cleanupMu.Unlock()
+		// Stop can lose a race with a callback which has already started. Only
+		// the timer still registered for this record is allowed to delete it.
+		if current {
+			remove()
+		}
+	})
+	s.cleanupTimers[key] = timer
+	s.cleanupMu.Unlock()
 }
 
 func (s *Signaler) handle(ctx context.Context, leg string, offer OfferBlob, reply func(AnswerBlob) error, discard func()) {
@@ -331,75 +372,4 @@ func firestoreAnswerDocument(answer AnswerBlob, now time.Time) (map[string]any, 
 		"answer":   string(encoded),
 		"expireAt": now.Add(5 * time.Minute),
 	}, nil
-}
-
-// sweep clears entries abandoned by clients that never came back. Firestore
-// also has a native TTL policy, but that is best-effort within 24 hours, so it
-// is a backstop rather than the mechanism.
-func (s *Signaler) sweep(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		cutoff := time.Now().Add(-60 * time.Second)
-		docs := s.firestore.Collection("signal").Where("expireAt", "<", cutoff).Documents(ctx)
-		for {
-			doc, err := docs.Next()
-			if err != nil {
-				break
-			}
-			_, _ = doc.Ref.Delete(ctx)
-		}
-		docs.Stop()
-
-		// RTDB too. Without this, offers from clients that never came back stay
-		// forever — and because the poller reads the whole subtree, every
-		// abandoned entry permanently inflates the cost of every read.
-		s.sweepRTDB(ctx)
-	}
-}
-
-// sweepRTDB removes /signal entries that no client is waiting on.
-//
-// Keys are listed shallow — just the uids, not their payloads — so the sweep
-// itself never downloads SDP blobs. Anything first seen more than a minute ago
-// is gone: a client that has not collected its answer by then has given up.
-func (s *Signaler) sweepRTDB(ctx context.Context) {
-	var keys map[string]bool
-	if err := s.rtdb.NewRef("signal").GetShallow(ctx, &keys); err != nil {
-		log.Printf("rtdb sweep: %v", err)
-		return
-	}
-
-	now := time.Now()
-	s.mu.Lock()
-	for uid := range keys {
-		if _, known := s.firstSeen[uid]; !known {
-			s.firstSeen[uid] = now
-		}
-	}
-	stale := make([]string, 0)
-	for uid, at := range s.firstSeen {
-		if _, present := keys[uid]; !present {
-			delete(s.firstSeen, uid)
-			continue
-		}
-		if now.Sub(at) > time.Minute {
-			stale = append(stale, uid)
-			delete(s.firstSeen, uid)
-		}
-	}
-	s.mu.Unlock()
-
-	for _, uid := range stale {
-		if err := s.rtdb.NewRef("signal/" + uid).Delete(ctx); err != nil {
-			log.Printf("rtdb sweep %s: %v", uid, err)
-			continue
-		}
-		log.Printf("rtdb swept abandoned offer %s", uid)
-	}
 }

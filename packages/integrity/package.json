@@ -1,6 +1,6 @@
 {
   "name": "shaintloadingcheckpak",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Signed immutable loader pointer for YuriRTC carriers.",
   "license": "MIT",
   "contentPolicy": {

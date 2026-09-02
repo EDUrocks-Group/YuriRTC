@@ -21,10 +21,8 @@ import { retryDelayMs } from "./retry.js";
 import {
   clearRoutePreference,
   readRoutePreference,
-  rememberRoutePreference,
   rememberTcpPreference
 } from "./adaptive-transport.js";
-import { raceInitialRoutes } from "./route-race.js";
 
 export { YuriRTCClient, YuriRTCClient as LoaderClient } from "./client.js";
 export { CarriedWebSocket } from "./websocket.js";
@@ -228,7 +226,10 @@ export async function boot(options: BootOptions): Promise<YuriRTCClient> {
   let connectPromise: Promise<ConnectionDiagnostics> | null = null;
   let routeStorage: Storage | undefined;
   try {
-    routeStorage = globalThis.sessionStorage;
+    // A measured slow-UDP result remains useful on the next browser session.
+    // The value is short-lived and contains only "auto"/"tcp", never an IP or
+    // candidate. localStorage avoids paying for a new route race every tab.
+    routeStorage = globalThis.localStorage;
   } catch {
     /* private/hardened contexts may reject even reading the Storage property */
   }
@@ -236,7 +237,6 @@ export async function boot(options: BootOptions): Promise<YuriRTCClient> {
   const rememberedRoute = readRoutePreference(routeStorage, routePreferenceKey);
   let preferredTransport: NonNullable<ConnectionOptions["transport"]> =
     rememberedRoute ?? "auto";
-  let initialRouteRaceNeeded = rememberedRoute === null;
   let adaptiveFallbackAttempted = false;
   let adaptiveFallbackPending = false;
   let adaptiveReplacement: Promise<void> | null = null;
@@ -246,7 +246,6 @@ export async function boot(options: BootOptions): Promise<YuriRTCClient> {
   const resetRouteStateForNetworkChange = (clearPending: boolean): void => {
     routeNetworkEpoch += 1;
     preferredTransport = "auto";
-    initialRouteRaceNeeded = true;
     adaptiveFallbackAttempted = false;
     if (clearPending) adaptiveFallbackPending = false;
     clearRoutePreference(routeStorage, routePreferenceKey);
@@ -280,38 +279,19 @@ export async function boot(options: BootOptions): Promise<YuriRTCClient> {
     const requestedTransport = preferredTransport;
     connectPromise = (async () => {
       try {
-        let diagnostics: ConnectionDiagnostics;
-        if (
-          !reconnecting &&
-          !everConnected &&
-          requestedTransport === "auto" &&
-          initialRouteRaceNeeded
-        ) {
-          const tcpCandidate = new YuriRTCClient(config, location.pathname);
-          const selection = await raceInitialRoutes(activeClient, tcpCandidate);
-          client = selection.winner;
-          activeClient = selection.winner;
-          diagnostics = selection.diagnostics;
-          await client.attach(registration);
-          observeClient(client);
-          initialRouteRaceNeeded = false;
-          preferredTransport = selection.transport;
-          rememberRoutePreference(
-            routeStorage,
-            routePreferenceKey,
-            selection.transport
-          );
-        } else {
-          if (reconnecting) activeClient.retireRoute();
-          const delegated = activeClient !== client;
-          diagnostics = await activeClient.connect(delegated ? undefined : registration, {
-            transport: requestedTransport
-          });
-          // The permanent shell owns the sole SW MessagePort. A replacement RTC
-          // route receives requests through that original router, so reconnecting
-          // a delegated route reattaches the shell only after SCTP is open.
-          if (delegated) await client.attach(registration);
-        }
+        // One initial ICE connection avoids doubling signaling plus a pair of
+        // 1 MiB probes on every new session. The existing goodput monitor still
+        // warms and promotes a TCP route when real application traffic proves
+        // UDP is slow, and that result is remembered for the next boot.
+        if (reconnecting) activeClient.retireRoute();
+        const delegated = activeClient !== client;
+        const diagnostics = await activeClient.connect(delegated ? undefined : registration, {
+          transport: requestedTransport
+        });
+        // The permanent shell owns the sole SW MessagePort. A replacement RTC
+        // route receives requests through that original router, so reconnecting
+        // a delegated route reattaches the shell only after SCTP is open.
+        if (delegated) await client.attach(registration);
         const restored = everConnected;
         // The original boot() promise has already rejected after an initial
         // failure, so no outer continuation remains to mount the app. A later

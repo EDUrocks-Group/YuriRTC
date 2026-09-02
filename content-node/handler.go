@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -151,7 +152,15 @@ func splitPath(raw string) (string, string) {
 // The library is reached through a symlink, so EvalSymlinks would reject every
 // legitimate path — containment is enforced on the lexical path instead.
 func (h *Handler) resolve(urlPath string) (string, error) {
-	clean := filepath.Clean("/" + strings.TrimPrefix(urlPath, "/"))
+	// RequestHead carries the browser URL's escaped pathname rather than
+	// net/http's already-decoded URL.Path. Decode it exactly once so ordinary
+	// filenames such as Unity's "GunSpin WebGL FinalVersion.json" resolve to
+	// the same file Caddy serves. PathUnescape deliberately leaves '+' alone.
+	decoded, err := url.PathUnescape(urlPath)
+	if err != nil || strings.IndexByte(decoded, 0) >= 0 {
+		return "", errors.New("invalid escaped path")
+	}
+	clean := filepath.Clean("/" + strings.TrimPrefix(decoded, "/"))
 	if strings.Contains(clean, "..") {
 		return "", errors.New("path traversal")
 	}

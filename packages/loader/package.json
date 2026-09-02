@@ -1,6 +1,6 @@
 {
   "name": "@advwebrec/grainloading",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "type": "module",
   "description": "YuriRTC browser client and service worker transport.",
   "license": "AGPL-3.0-only",

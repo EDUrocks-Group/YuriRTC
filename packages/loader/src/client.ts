@@ -311,18 +311,24 @@ export class YuriRTCClient {
       const offer = await pc.createOffer();
       this.assertCurrent(pc, generation);
       await pc.setLocalDescription(offer);
-      const candidates = await gatherCandidates(pc);
+      await gatherCandidates(pc);
       this.assertCurrent(pc, generation);
 
       const sessionId = randomId(16);
       const blob: OfferBlob = {
         sessionId,
         sdp: pc.localDescription?.sdp ?? offer.sdp ?? "",
-        candidates
+        // Non-trickle gathering has already placed every candidate in the
+        // completed SDP. Repeating them as JSON made each offer substantially
+        // larger without adding a route; old nodes already consume SDP first.
+        candidates: []
       };
 
       const result = await raceBackends(this.backends(), blob, {
-        hedgeDelayMs: this.config.signal.hedgeDelayMs ?? 1_500,
+        // RTDB is a resilience leg, not routine duplicate work. A healthy
+        // Firestore exchange normally finishes before this window; an actual
+        // Firestore failure still launches RTDB immediately in raceBackends.
+        hedgeDelayMs: this.config.signal.hedgeDelayMs ?? 4_000,
         onLegFailure: (name) => console.warn(`[YuriRTC] signal leg ${name} failed`)
       });
       this.assertCurrent(pc, generation);

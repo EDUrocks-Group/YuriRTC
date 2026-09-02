@@ -34,7 +34,26 @@ export interface RtdbConfig {
 interface SignUpResponse {
   idToken: string;
   localId: string;
+  refreshToken: string;
+  expiresIn: string;
 }
+
+interface RefreshResponse {
+  id_token: string;
+  refresh_token: string;
+  user_id: string;
+  expires_in: string;
+}
+
+interface StoredIdentity {
+  idToken: string;
+  localId: string;
+  refreshToken: string;
+  expiresAt: number;
+}
+
+const AUTH_EXPIRY_SKEW_MS = 60_000;
+const authInFlight = new Map<string, Promise<StoredIdentity>>();
 
 export class RtdbBackend implements SignalBackend {
   readonly name = "rtdb";
@@ -46,41 +65,75 @@ export class RtdbBackend implements SignalBackend {
     const timer = AbortSignal.timeout(timeout);
     const combined = anySignal([signal, timer]);
 
-    const { idToken, localId } = await this.signIn(combined);
+    const identity = await this.identity(combined);
+    const { idToken, localId } = identity;
     const base = this.config.databaseUrl.replace(/\/+$/, "");
     const auth = encodeURIComponent(idToken);
     const operation = new AbortController();
     const active = anySignal([combined, operation.signal]);
 
-    // This uid is freshly minted, so its answer leaf cannot be stale. Open the
-    // stream before issuing the write and overlap their network setup. If either
-    // side fails, abort the other so neither a fetch nor an EventSource leaks.
+    // The identity is deliberately reused, so replace the complete branch
+    // before opening the stream. That atomically removes any answer left from a
+    // prior connection; the EventSource's initial snapshot still catches an
+    // answer the node writes between this PUT and stream establishment.
+    const write = await fetch(
+      `${base}/signal/${localId}.json?auth=${auth}&print=silent`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ offer }),
+        signal: active
+      }
+    );
+    if (!write.ok) {
+      // 401 means the cached credential is unusable. A 403 can instead mean
+      // deployment rules or App Check rejected an otherwise valid identity;
+      // minting another anonymous account would repeat the failure and cost.
+      if (write.status === 401) this.clearIdentity(identity);
+      throw new SignalError(`offer write failed: ${write.status}`, this.name);
+    }
+
     const answer = this.awaitAnswer(
       `${base}/signal/${localId}/answer.json?auth=${auth}`,
       active
     );
-    const write = fetch(
-      `${base}/signal/${localId}/offer.json?auth=${auth}&print=silent`,
-      {
-        method: "PUT",
-        body: JSON.stringify(offer),
-        signal: active
-      }
-    ).then((response) => {
-      if (!response.ok) {
-        throw new SignalError(`offer write failed: ${response.status}`, this.name);
-      }
-    });
 
     try {
-      const [, result] = await Promise.all([write, answer]);
-      return result;
+      return await answer;
     } finally {
       operation.abort();
     }
   }
 
-  private async signIn(signal: AbortSignal): Promise<SignUpResponse> {
+  private async identity(signal: AbortSignal): Promise<StoredIdentity> {
+    const key = this.identityKey();
+    const cached = this.readIdentity();
+    if (cached && cached.expiresAt > Date.now() + AUTH_EXPIRY_SKEW_MS) return cached;
+
+    const pending = authInFlight.get(key);
+    if (pending) return pending;
+    const operation = this.acquireIdentity(cached, signal).finally(() => {
+      if (authInFlight.get(key) === operation) authInFlight.delete(key);
+    });
+    authInFlight.set(key, operation);
+    return operation;
+  }
+
+  private async acquireIdentity(
+    cached: StoredIdentity | null,
+    signal: AbortSignal
+  ): Promise<StoredIdentity> {
+    if (cached?.refreshToken) {
+      try {
+        const refreshed = await this.refresh(cached, signal);
+        this.writeIdentity(refreshed);
+        return refreshed;
+      } catch (error) {
+        if (isAbort(error)) throw error;
+        this.clearIdentity(cached);
+      }
+    }
+
     const response = await fetch(
       `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(this.config.apiKey)}`,
       {
@@ -94,10 +147,88 @@ export class RtdbBackend implements SignalBackend {
       throw new SignalError(`anonymous sign-in failed: ${response.status}`, this.name);
     }
     const body = (await response.json()) as Partial<SignUpResponse>;
-    if (!body.idToken || !body.localId) {
-      throw new SignalError("sign-in response missing idToken/localId", this.name);
+    if (!body.idToken || !body.localId || !body.refreshToken) {
+      throw new SignalError("sign-in response missing token identity", this.name);
     }
-    return { idToken: body.idToken, localId: body.localId };
+    const identity = storedIdentity(
+      body.idToken,
+      body.localId,
+      body.refreshToken,
+      body.expiresIn
+    );
+    this.writeIdentity(identity);
+    return identity;
+  }
+
+  private async refresh(
+    cached: StoredIdentity,
+    signal: AbortSignal
+  ): Promise<StoredIdentity> {
+    const response = await fetch(
+      `https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(this.config.apiKey)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: cached.refreshToken
+        }),
+        signal
+      }
+    );
+    if (!response.ok) {
+      throw new SignalError(`anonymous token refresh failed: ${response.status}`, this.name);
+    }
+    const body = (await response.json()) as Partial<RefreshResponse>;
+    if (!body.id_token || !body.refresh_token) {
+      throw new SignalError("refresh response missing token identity", this.name);
+    }
+    return storedIdentity(
+      body.id_token,
+      body.user_id ?? cached.localId,
+      body.refresh_token,
+      body.expires_in
+    );
+  }
+
+  private identityKey(): string {
+    return `yurirtc:rtdb-auth:${this.config.apiKey}:${this.config.databaseUrl.replace(/\/+$/, "")}`;
+  }
+
+  private readIdentity(): StoredIdentity | null {
+    try {
+      const raw = globalThis.localStorage?.getItem(this.identityKey());
+      if (!raw) return null;
+      const value = JSON.parse(raw) as Partial<StoredIdentity>;
+      if (
+        typeof value.idToken === "string" &&
+        typeof value.localId === "string" &&
+        typeof value.refreshToken === "string" &&
+        Number.isFinite(value.expiresAt)
+      ) return value as StoredIdentity;
+    } catch {
+      // Private contexts and strict storage policies may reject localStorage.
+    }
+    return null;
+  }
+
+  private writeIdentity(identity: StoredIdentity): void {
+    try {
+      globalThis.localStorage?.setItem(this.identityKey(), JSON.stringify(identity));
+    } catch {
+      /* anonymous auth reuse is an optional cost optimization */
+    }
+  }
+
+  private clearIdentity(identity: StoredIdentity): void {
+    try {
+      const current = this.readIdentity();
+      if (!current || current.refreshToken === identity.refreshToken) {
+        globalThis.localStorage?.removeItem(this.identityKey());
+      }
+    } catch {
+      /* storage is optional */
+    }
   }
 
   /**
@@ -159,6 +290,17 @@ export class RtdbBackend implements SignalBackend {
         : new SignalError(String(error), this.name);
     });
   }
+}
+
+function storedIdentity(
+  idToken: string,
+  localId: string,
+  refreshToken: string,
+  expiresIn: string | undefined
+): StoredIdentity {
+  const seconds = Number(expiresIn);
+  const lifetimeMs = Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : 3_600_000;
+  return { idToken, localId, refreshToken, expiresAt: Date.now() + lifetimeMs };
 }
 
 /** `AbortSignal.any` is not in every target yet; this is the same contract. */
