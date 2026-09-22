@@ -20,9 +20,10 @@ source. The signed fetch path has a 15-second per-attempt timeout.
 
 New carriers accept the previously published two-source manifest and derive the
 five immutable URLs from its authenticated package/version/hash. Old carriers
-only accept the old manifest URL list. Deploy upgraded carriers before publishing
-a five-source pointer, and publish changed loader bytes under a new immutable
-package version. This change does not publish packages or alter live deployments.
+only accept the old manifest URL list. Production signing therefore retains that
+two-source signed wire format, while upgraded carriers use all five sources.
+This permits a loader update without republishing every carrier npm package.
+Publish changed loader bytes under a new immutable package version.
 
 ## RTDB rollout
 

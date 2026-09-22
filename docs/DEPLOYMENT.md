@@ -219,13 +219,12 @@ release with the same guarded command on every pass:
 1. The first pass stages `@advwebrec/grainloading` and stops. Review and approve
    the staged loader on the npmjs.com website with the required human 2FA
    challenge.
-2. Upgrade and verify every active carrier before changing the pointer: older
-   carriers reject the new five-source signed list. Add
-   `YURIRTC_CARRIER_UPGRADE_OK=1` to the guarded command only after this check.
-   Run the command again. It recognizes the published loader, verifies its
+2. Run the command again. It recognizes the published loader, verifies its
    registry tarball and all five immutable CDN copies, regenerates and verifies the
    signed pointer, stages `shaintloadingcheckpak`, and stops. Review and approve
-   that stage on the npmjs.com website with 2FA.
+   that stage on the npmjs.com website with 2FA. The published pointer retains
+   the legacy two-URL signed format; upgraded carriers derive all five runtime
+   URLs from its authenticated version and hash, so older npm carriers keep working.
 3. Run the command a final time. It recognizes both published versions,
    verifies the signed pointer's registry and CDN bytes, and completes.
 

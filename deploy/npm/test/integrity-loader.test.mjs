@@ -391,3 +391,16 @@ test("a signed legacy pointer safely expands to the five immutable mirrors", asy
   assert.equal(verified.verified, true);
   assert.deepEqual(verified.descriptor.urls, descriptor.urls);
 });
+
+
+test("release pointers preserve legacy URLs while upgraded carriers use all five", async () => {
+  const legacy = loaderDescriptor("0.5.4", digest, { legacyCdnUrls: true });
+  assert.deepEqual(legacy.urls, [
+    "https://cdn.jsdelivr.net/npm/@advwebrec/grainloading@0.5.4/dist/bundle/client.js",
+    "https://unpkg.com/@advwebrec/grainloading@0.5.4/dist/bundle/client.js"
+  ]);
+  const verified = await verifyEnvelope(JSON.stringify(signManifest(legacy, privateKey)), spki, webcrypto);
+  assert.equal(verified.verified, true);
+  assert.deepEqual(verified.descriptor.urls, loaderDescriptor("0.5.4", digest).urls);
+  assert.equal(verified.descriptor.sha256, digest);
+});

@@ -21,17 +21,18 @@ export function fromBase64url(value, label = "value") {
   return Buffer.from(value, "base64url");
 }
 
-export function loaderDescriptor(version, sha256) {
+export function loaderDescriptor(version, sha256, { legacyCdnUrls = false } = {}) {
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
     throw new Error(`invalid loader version ${version}`);
   }
   if (!/^[A-Za-z0-9_-]{43}$/.test(sha256)) {
     throw new Error("loader SHA-256 must be unpadded base64url");
   }
+  const urls = packageUrls("@advwebrec/grainloading", version, "dist/bundle/client.js");
   return {
     package: "@advwebrec/grainloading",
     version,
-    urls: packageUrls("@advwebrec/grainloading", version, "dist/bundle/client.js"),
+    urls: legacyCdnUrls ? [urls[1], urls[0]] : urls,
     sha256
   };
 }

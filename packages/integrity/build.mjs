@@ -57,7 +57,12 @@ if (base64url(derivedPublic) !== publicConfiguration.spki) {
 }
 
 const sha256 = createHash("sha256").update(client).digest("base64url");
-const manifest = signManifest(loaderDescriptor(String(loaderPackage.version), sha256), privateKey);
+// Published npm carriers cannot all be replaced. Keep their signed wire shape;
+// upgraded carriers derive all five immutable URLs from these authenticated fields.
+const manifest = signManifest(
+  loaderDescriptor(String(loaderPackage.version), sha256, { legacyCdnUrls: true }),
+  privateKey
+);
 if (!verifyManifest(manifest, publicKey)) {
   throw new Error("generated loader manifest failed its own signature verification");
 }

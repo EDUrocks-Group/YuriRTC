@@ -292,13 +292,6 @@ done
 echo "verified live loader $LOADER_NAME@$LOADER_VERSION on npm and all five runtime CDNs"
 
 if ! version_exists "$POINTER_NAME" "$POINTER_VERSION"; then
-  # Older carriers only accept the signed two-source list. Moving latest to
-  # a five-source pointer before upgrading active carriers would break them.
-  if [[ "${YURIRTC_CARRIER_UPGRADE_OK:-}" != "1" ]]; then
-    echo "refusing the five-CDN pointer until active carriers have been upgraded and verified" >&2
-    echo "set YURIRTC_CARRIER_UPGRADE_OK=1 only after verifying those deployments" >&2
-    exit 1
-  fi
   pointer_listing="$(npm_stage_for_token "$NPM_INTEGRITY_TOKEN" stage list "$POINTER_NAME" --json)"
   if ! stage_listing_has_version "$POINTER_VERSION" <<<"$pointer_listing"; then
     # Sign only after every immutable loader runtime asset is live on all five CDNs.

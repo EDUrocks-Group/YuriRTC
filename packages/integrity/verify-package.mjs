@@ -115,7 +115,8 @@ if (
   throw new Error("loader.json does not identify the exact local loader build");
 }
 const expectedUrls = packageUrls("@advwebrec/grainloading", loaderPackage.version, "dist/bundle/client.js");
-if (JSON.stringify(payload.loader.urls) !== JSON.stringify(expectedUrls)) {
+const legacyUrls = [expectedUrls[1], expectedUrls[0]];
+if (![expectedUrls, legacyUrls].some(urls => JSON.stringify(payload.loader.urls) === JSON.stringify(urls))) {
   throw new Error("loader.json does not contain the ordered immutable loader CDN URLs");
 }
 
