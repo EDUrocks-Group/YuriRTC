@@ -1,0 +1,359 @@
+yuri-cpu-app-bench.log
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkPeerCertificateReuse/fresh-certificate-7         	    2242	    482338 ns/op	   44281 B/op	     574 allocs/op
+BenchmarkPeerCertificateReuse/fresh-certificate-7         	    1836	    686959 ns/op	   44269 B/op	     573 allocs/op
+BenchmarkPeerCertificateReuse/fresh-certificate-7         	    2287	    633201 ns/op	   44255 B/op	     573 allocs/op
+BenchmarkPeerCertificateReuse/reused-certificate-7        	    9009	    123274 ns/op	   26396 B/op	     304 allocs/op
+BenchmarkPeerCertificateReuse/reused-certificate-7        	    7780	    130653 ns/op	   26400 B/op	     304 allocs/op
+BenchmarkPeerCertificateReuse/reused-certificate-7        	    8508	    130168 ns/op	   26400 B/op	     304 allocs/op
+BenchmarkRejectedCompressionDecision/baseline-repeat-compression-7         	      73	  16727732 ns/op	 4678324 B/op	      11 allocs/op
+BenchmarkRejectedCompressionDecision/baseline-repeat-compression-7         	      60	  17467229 ns/op	 4678332 B/op	      12 allocs/op
+BenchmarkRejectedCompressionDecision/baseline-repeat-compression-7         	      78	  17364499 ns/op	 4678332 B/op	      12 allocs/op
+BenchmarkRejectedCompressionDecision/bounded-cached-rejection-7            	13125198	        88.63 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRejectedCompressionDecision/bounded-cached-rejection-7            	11160996	       111.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRejectedCompressionDecision/bounded-cached-rejection-7            	26812180	        48.55 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLargePrecompressedAsset/dynamic-gzip-7                            	      13	  89788969 ns/op	  235841 B/op	      29 allocs/op
+BenchmarkLargePrecompressedAsset/dynamic-gzip-7                            	      21	  64534819 ns/op	  196634 B/op	      29 allocs/op
+BenchmarkLargePrecompressedAsset/dynamic-gzip-7                            	      25	  53832585 ns/op	  186401 B/op	      28 allocs/op
+BenchmarkLargePrecompressedAsset/verified-sidecar-7                        	   16525	    129756 ns/op	    2207 B/op	      34 allocs/op
+BenchmarkLargePrecompressedAsset/verified-sidecar-7                        	   10000	    105269 ns/op	    2207 B/op	      34 allocs/op
+BenchmarkLargePrecompressedAsset/verified-sidecar-7                        	   10000	    127319 ns/op	    2211 B/op	      34 allocs/op
+PASS
+ok  	yurirtc/content-node	37.248s
+
+
+yuri-cpu-before-udp.log
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkLoopbackDownload/udp/64MiB-credit64-refill8-7         	       5	1329301062 ns/op	  50.49 MB/s	       403.9 Mbps
+PASS
+
+
+yuri-cpu-before-udp-top.txt
+File: yurirtc-cpu-before.test
+Build ID: 44e0d157d237b601f998d7003f5b76ebd59651a7
+Type: cpu
+Time: 2026-09-22 00:49:14 CDT
+Duration: 9.21s, Total samples = 12900ms (140.00%)
+Active filters:
+   tagfocus=side=server
+Showing nodes accounting for 6670ms, 51.71% of 12900ms total
+Dropped 358 nodes (cum <= 64.50ms)
+Showing top 12 nodes out of 219
+      flat  flat%   sum%        cum   cum%
+    3770ms 29.22% 29.22%     3770ms 29.22%  internal/runtime/syscall.Syscall6
+     450ms  3.49% 32.71%      450ms  3.49%  runtime.memclrNoHeapPointers
+     390ms  3.02% 35.74%      390ms  3.02%  runtime.memmove
+     380ms  2.95% 38.68%      380ms  2.95%  crypto/internal/fips140/aes/gcm.gcmAesEnc
+     280ms  2.17% 40.85%      960ms  7.44%  runtime.selectgo
+     260ms  2.02% 42.87%      260ms  2.02%  internal/runtime/atomic.(*Uint32).CompareAndSwap
+     250ms  1.94% 44.81%      300ms  2.33%  runtime.lock2
+     220ms  1.71% 46.51%      220ms  1.71%  sync/atomic.(*Int32).Add
+     180ms  1.40% 47.91%      200ms  1.55%  runtime.unlock2
+     170ms  1.32% 49.22%      200ms  1.55%  internal/sync.(*Mutex).Lock
+     160ms  1.24% 50.47%      160ms  1.24%  runtime.nextFreeFast
+     160ms  1.24% 51.71%      160ms  1.24%  time.runtimeNow
+
+
+yuri-cpu-after-udp.log
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkLoopbackDownload/udp/64MiB-credit64-refill8-7         	       5	1181035530 ns/op	  56.82 MB/s	       454.6 Mbps
+PASS
+
+
+yuri-cpu-after-udp-top.txt
+File: yurirtc-cpu-after.test
+Build ID: 8360dafe09b155a62673334be5815ce72745c3b8
+Type: cpu
+Time: 2026-09-22 00:49:23 CDT
+Duration: 7.92s, Total samples = 9810ms (123.85%)
+Active filters:
+   tagfocus=side=server
+Showing nodes accounting for 5670ms, 57.80% of 9810ms total
+Dropped 239 nodes (cum <= 49.05ms)
+Showing top 12 nodes out of 215
+      flat  flat%   sum%        cum   cum%
+    3780ms 38.53% 38.53%     3780ms 38.53%  internal/runtime/syscall.Syscall6
+     290ms  2.96% 41.49%      290ms  2.96%  crypto/internal/fips140/aes/gcm.gcmAesEnc
+     240ms  2.45% 43.93%      240ms  2.45%  runtime.memmove
+     200ms  2.04% 45.97%      540ms  5.50%  runtime.selectgo
+     190ms  1.94% 47.91%      190ms  1.94%  runtime.memclrNoHeapPointers
+     180ms  1.83% 49.75%      180ms  1.83%  time.runtimeNow
+     160ms  1.63% 51.38%      160ms  1.63%  internal/sync.(*Mutex).Lock
+     150ms  1.53% 52.91%      160ms  1.63%  internal/sync.(*Mutex).Unlock
+     150ms  1.53% 54.43%      150ms  1.53%  runtime.nextFreeFast (inline)
+     110ms  1.12% 55.56%      120ms  1.22%  runtime.lock2
+     110ms  1.12% 56.68%      510ms  5.20%  runtime.mallocgcSmallScanNoHeader
+     110ms  1.12% 57.80%      110ms  1.12%  sync/atomic.(*Int32).Add
+
+
+yuri-cpu-before-tcp.log
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkLoopbackDownload/tcp/64MiB-credit64-refill8-7         	       5	1699043703 ns/op	  39.50 MB/s	       316.0 Mbps
+PASS
+
+
+yuri-cpu-before-tcp-top.txt
+File: yurirtc-cpu-before.test
+Build ID: 44e0d157d237b601f998d7003f5b76ebd59651a7
+Type: cpu
+Time: 2026-09-22 00:49:40 CDT
+Duration: 10.82s, Total samples = 13.70s (126.60%)
+Active filters:
+   tagfocus=side=server
+Showing nodes accounting for 8.26s, 60.29% of 13.70s total
+Dropped 323 nodes (cum <= 0.07s)
+Showing top 12 nodes out of 191
+      flat  flat%   sum%        cum   cum%
+     5.37s 39.20% 39.20%      5.37s 39.20%  internal/runtime/syscall.Syscall6
+     0.48s  3.50% 42.70%      0.48s  3.50%  runtime.memclrNoHeapPointers
+     0.46s  3.36% 46.06%      0.46s  3.36%  runtime.memmove
+     0.41s  2.99% 49.05%      0.91s  6.64%  runtime.selectgo
+     0.37s  2.70% 51.75%      0.37s  2.70%  crypto/internal/fips140/aes/gcm.gcmAesEnc
+     0.23s  1.68% 53.43%      0.24s  1.75%  runtime.lock2
+     0.19s  1.39% 54.82%      0.19s  1.39%  runtime.nextFreeFast (inline)
+     0.18s  1.31% 56.13%      0.19s  1.39%  runtime.unlock2
+     0.17s  1.24% 57.37%      0.17s  1.24%  internal/runtime/atomic.(*Uint32).CompareAndSwap
+     0.17s  1.24% 58.61%      0.18s  1.31%  runtime.(*mspan).writeHeapBitsSmall
+     0.12s  0.88% 59.49%      0.35s  2.55%  runtime.newproc1
+     0.11s   0.8% 60.29%      0.63s  4.60%  runtime.mallocgcSmallScanNoHeader
+
+
+yuri-cpu-after-tcp.log
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkLoopbackDownload/tcp/64MiB-credit64-refill8-7         	       5	1251286048 ns/op	  53.63 MB/s	       429.1 Mbps
+PASS
+
+
+yuri-cpu-after-tcp-top.txt
+File: yurirtc-cpu-after.test
+Build ID: 8360dafe09b155a62673334be5815ce72745c3b8
+Type: cpu
+Time: 2026-09-22 00:49:31 CDT
+Duration: 8.90s, Total samples = 10.59s (119.01%)
+Active filters:
+   tagfocus=side=server
+Showing nodes accounting for 6.79s, 64.12% of 10.59s total
+Dropped 280 nodes (cum <= 0.05s)
+Showing top 12 nodes out of 181
+      flat  flat%   sum%        cum   cum%
+     4.91s 46.36% 46.36%      4.91s 46.36%  internal/runtime/syscall.Syscall6
+     0.38s  3.59% 49.95%      0.38s  3.59%  runtime.memmove
+     0.33s  3.12% 53.07%      0.33s  3.12%  runtime.memclrNoHeapPointers
+     0.31s  2.93% 56.00%      0.31s  2.93%  crypto/internal/fips140/aes/gcm.gcmAesEnc
+     0.16s  1.51% 57.51%      0.16s  1.51%  runtime.nextFreeFast (inline)
+     0.12s  1.13% 58.64%      0.13s  1.23%  internal/sync.(*Mutex).Lock
+     0.12s  1.13% 59.77%      0.12s  1.13%  time.runtimeNow
+     0.10s  0.94% 60.72%      0.11s  1.04%  runtime.(*mspan).writeHeapBitsSmall
+     0.10s  0.94% 61.66%      0.51s  4.82%  runtime.mallocgcSmallScanNoHeader
+     0.09s  0.85% 62.51%      0.09s  0.85%  aeshashbody
+     0.09s  0.85% 63.36%      0.34s  3.21%  runtime.selectgo
+     0.08s  0.76% 64.12%      0.08s  0.76%  internal/sync.(*Mutex).Unlock
+
+
+yuri-cpu-wan.log
+WAN_CASE start name=udp-clean-128ms protocol=udp fixture_mib=64 netem=delay 64ms rate 100mbit
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANDownload/udp-7         	       1	11309353652 ns/op	   5.93 MB/s	        47.47 Mbps	680928904 B/op	 3765771 allocs/op
+PASS
+ok  	yurirtc/content-node	12.378s
+WAN_CASE pass name=udp-clean-128ms measured_mbps=47.47 minimum_mbps=35
+WAN_CASE start name=udp-random-loss-128ms protocol=udp fixture_mib=64 netem=delay 64ms loss random 0.01% seed 42 rate 100mbit
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANDownload/udp-7         	       1	37260415673 ns/op	   1.80 MB/s	        14.41 Mbps	677092912 B/op	 3950719 allocs/op
+PASS
+ok  	yurirtc/content-node	38.410s
+WAN_CASE pass name=udp-random-loss-128ms measured_mbps=14.41 minimum_mbps=14
+WAN_CASE start name=tcp-random-loss-128ms protocol=tcp fixture_mib=64 netem=delay 64ms loss random 0.1% seed 42 rate 100mbit
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANDownload/tcp-7         	       1	14993444830 ns/op	   4.48 MB/s	        35.81 Mbps	743344344 B/op	 3776909 allocs/op
+PASS
+ok  	yurirtc/content-node	16.176s
+WAN_CASE pass name=tcp-random-loss-128ms measured_mbps=35.81 minimum_mbps=14
+WAN_CASE start name=udp-clean-300ms protocol=udp fixture_mib=64 netem=delay 150ms rate 100mbit
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANDownload/udp-7         	       1	23782057079 ns/op	   2.82 MB/s	        22.57 Mbps	671068456 B/op	 3762265 allocs/op
+PASS
+ok  	yurirtc/content-node	26.118s
+WAN_CASE pass name=udp-clean-300ms measured_mbps=22.57 minimum_mbps=14
+WAN_CASE start name=udp-random-loss-300ms protocol=udp fixture_mib=64 netem=delay 150ms loss random 0.01% seed 42 rate 100mbit
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANDownload/udp-7         	       1	28027240153 ns/op	   2.39 MB/s	        19.16 Mbps	676994384 B/op	 3956885 allocs/op
+PASS
+ok  	yurirtc/content-node	30.284s
+WAN_CASE pass name=udp-random-loss-300ms measured_mbps=19.16 minimum_mbps=14
+WAN_CASE start name=udp-burst-loss-128ms protocol=udp fixture_mib=64 netem=delay 64ms loss gemodel 0.05% 90% 80% 0.01% rate 100mbit
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANDownload/udp-7         	       1	99348728472 ns/op	   0.68 MB/s	         5.404 Mbps	684208800 B/op	 4178704 allocs/op
+PASS
+ok  	yurirtc/content-node	100.512s
+WAN_CASE pass name=udp-burst-loss-128ms measured_mbps=5.404 minimum_mbps=4
+WAN_CASE start name=tcp-burst-loss-128ms protocol=tcp fixture_mib=64 netem=delay 64ms loss gemodel 0.05% 90% 80% 0.01% rate 100mbit
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANDownload/tcp-7         	       1	15305792546 ns/op	   4.38 MB/s	        35.08 Mbps	739419336 B/op	 3711442 allocs/op
+PASS
+ok  	yurirtc/content-node	16.573s
+WAN_CASE pass name=tcp-burst-loss-128ms measured_mbps=35.08 minimum_mbps=20
+WAN_CASE start name=udp-reorder-128ms protocol=udp fixture_mib=64 netem=delay 64ms reorder 0.1% 50% seed 42 rate 100mbit
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANDownload/udp-7         	       1	11355333582 ns/op	   5.91 MB/s	        47.28 Mbps	682147152 B/op	 3835700 allocs/op
+PASS
+ok  	yurirtc/content-node	12.576s
+WAN_CASE pass name=udp-reorder-128ms measured_mbps=47.28 minimum_mbps=14
+WAN_CASE start name=udp-three-lanes-random-loss-128ms protocol=udp fixture_mib=64 netem=delay 64ms loss random 0.01% seed 42 rate 100mbit
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANParallelDownload/udp-7         	       1	73657976779 ns/op	   2.73 MB/s	        21.87 Mbps	2100502752 B/op	13159049 allocs/op
+PASS
+ok  	yurirtc/content-node	75.009s
+WAN_CASE pass name=udp-three-lanes-random-loss-128ms measured_mbps=21.87 minimum_mbps=20
+WAN_MATRIX pass mode=--full
+
+
+yuri-cpu-final-race.log
+ok  	yurirtc/content-node	6.037s
+ok  	github.com/pion/dtls/v3	56.353s
+ok  	github.com/pion/dtls/v3/e2e	29.568s
+?   	github.com/pion/dtls/v3/examples/dial/cid	[no test files]
+?   	github.com/pion/dtls/v3/examples/dial/psk	[no test files]
+?   	github.com/pion/dtls/v3/examples/dial/selfsign	[no test files]
+?   	github.com/pion/dtls/v3/examples/dial/verify	[no test files]
+?   	github.com/pion/dtls/v3/examples/listen/cid	[no test files]
+?   	github.com/pion/dtls/v3/examples/listen/psk	[no test files]
+?   	github.com/pion/dtls/v3/examples/listen/selfsign	[no test files]
+?   	github.com/pion/dtls/v3/examples/listen/verify	[no test files]
+?   	github.com/pion/dtls/v3/examples/listen/verify-brute-force-protection	[no test files]
+?   	github.com/pion/dtls/v3/examples/util	[no test files]
+?   	github.com/pion/dtls/v3/internal/ciphersuite	[no test files]
+?   	github.com/pion/dtls/v3/internal/ciphersuite/types	[no test files]
+?   	github.com/pion/dtls/v3/internal/closer	[no test files]
+ok  	github.com/pion/dtls/v3/internal/net	(cached)
+ok  	github.com/pion/dtls/v3/internal/net/udp	(cached)
+?   	github.com/pion/dtls/v3/internal/util	[no test files]
+ok  	github.com/pion/dtls/v3/pkg/crypto/ccm	(cached)
+ok  	github.com/pion/dtls/v3/pkg/crypto/ciphersuite	(cached)
+?   	github.com/pion/dtls/v3/pkg/crypto/clientcertificate	[no test files]
+ok  	github.com/pion/dtls/v3/pkg/crypto/elliptic	(cached)
+ok  	github.com/pion/dtls/v3/pkg/crypto/fingerprint	(cached)
+ok  	github.com/pion/dtls/v3/pkg/crypto/hash	(cached)
+ok  	github.com/pion/dtls/v3/pkg/crypto/keyschedule	(cached)
+ok  	github.com/pion/dtls/v3/pkg/crypto/prf	(cached)
+?   	github.com/pion/dtls/v3/pkg/crypto/selfsign	[no test files]
+ok  	github.com/pion/dtls/v3/pkg/crypto/signature	(cached)
+ok  	github.com/pion/dtls/v3/pkg/crypto/signaturehash	(cached)
+?   	github.com/pion/dtls/v3/pkg/net	[no test files]
+ok  	github.com/pion/dtls/v3/pkg/protocol	(cached)
+ok  	github.com/pion/dtls/v3/pkg/protocol/alert	(cached)
+ok  	github.com/pion/dtls/v3/pkg/protocol/extension	(cached)
+ok  	github.com/pion/dtls/v3/pkg/protocol/handshake	(cached)
+ok  	github.com/pion/dtls/v3/pkg/protocol/recordlayer	(cached)
+ok  	github.com/pion/transport/v4/netctx	(cached)
+ok  	github.com/pion/sctp	38.721s
+?   	github.com/pion/sctp/examples/ping-pong/ping	[no test files]
+?   	github.com/pion/sctp/examples/ping-pong/pong	[no test files]
+
+
+yuri-cpu-final-app.log
+ok  	yurirtc/content-node	1.403s
+
+
+yuri-paired-loss-1-before.log
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANDownload/udp-7         	       1	38160882487 ns/op	   1.76 MB/s	        14.07 Mbps
+PASS
+
+
+yuri-paired-loss-2-after.log
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANDownload/udp-7         	       1	16696803747 ns/op	   4.02 MB/s	        32.15 Mbps
+PASS
+
+
+yuri-paired-loss-3-after.log
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANDownload/udp-7         	       1	19904033773 ns/op	   3.37 MB/s	        26.97 Mbps
+PASS
+
+
+yuri-paired-loss-4-before.log
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkWANDownload/udp-7         	       1	13210959934 ns/op	   5.08 MB/s	        40.64 Mbps
+PASS
+
+
+Playwright browser-to-Go matrix
+--- PASS: TestBrowserV3EndToEnd (208.42s)
+    --- PASS: TestBrowserV3EndToEnd/chromium (75.25s)
+        --- PASS: TestBrowserV3EndToEnd/chromium/udp (47.60s)
+            --- PASS: TestBrowserV3EndToEnd/chromium/udp/cdn (33.41s)
+            --- PASS: TestBrowserV3EndToEnd/chromium/udp/bundled (14.18s)
+        --- PASS: TestBrowserV3EndToEnd/chromium/tcp (27.65s)
+            --- PASS: TestBrowserV3EndToEnd/chromium/tcp/cdn (13.80s)
+            --- PASS: TestBrowserV3EndToEnd/chromium/tcp/bundled (13.85s)
+    --- PASS: TestBrowserV3EndToEnd/firefox (63.48s)
+        --- PASS: TestBrowserV3EndToEnd/firefox/udp (32.16s)
+            --- PASS: TestBrowserV3EndToEnd/firefox/udp/cdn (17.00s)
+            --- PASS: TestBrowserV3EndToEnd/firefox/udp/bundled (15.16s)
+        --- PASS: TestBrowserV3EndToEnd/firefox/tcp (31.32s)
+            --- PASS: TestBrowserV3EndToEnd/firefox/tcp/cdn (17.22s)
+            --- PASS: TestBrowserV3EndToEnd/firefox/tcp/bundled (14.09s)
+    --- PASS: TestBrowserV3EndToEnd/webkit (52.85s)
+        --- PASS: TestBrowserV3EndToEnd/webkit/udp (26.13s)
+            --- PASS: TestBrowserV3EndToEnd/webkit/udp/cdn (11.57s)
+            --- PASS: TestBrowserV3EndToEnd/webkit/udp/bundled (14.56s)
+        --- PASS: TestBrowserV3EndToEnd/webkit/tcp (26.71s)
+            --- PASS: TestBrowserV3EndToEnd/webkit/tcp/cdn (13.42s)
+            --- PASS: TestBrowserV3EndToEnd/webkit/tcp/bundled (13.29s)
+PASS

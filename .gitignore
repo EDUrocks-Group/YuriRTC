@@ -41,3 +41,9 @@ deploy/firebase/.firebase/
 
 # Internal deployment notes, never published
 INTERNAL-README.md
+
+# Public upstream DTLS example fixtures, required by the vendored module.
+!third_party/pion-dtls/examples/certificates/client.pem
+!third_party/pion-dtls/examples/certificates/client.pub.pem
+!third_party/pion-dtls/examples/certificates/server.pem
+!third_party/pion-dtls/examples/certificates/server.pub.pem

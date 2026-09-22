@@ -46,3 +46,5 @@ export {
   chunkBody,
   createRequestIdSource
 } from "./codec.js";
+
+export { packageUrls, CDN_ROOTS } from "./cdn.js";

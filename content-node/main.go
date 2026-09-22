@@ -80,17 +80,20 @@ const (
 )
 
 type options struct {
-	publicIP     string
-	bindIP       string
-	ports        []int
-	networkTypes []webrtc.NetworkType
-	root         string
-	backendURL   string
-	webSocketURL string
-	projectID    string
-	databaseURL  string
-	credentials  string
-	sctpCC       string
+	precompressedDir string
+	precompressOut   string
+	cacheRules       string
+	publicIP         string
+	bindIP           string
+	ports            []int
+	networkTypes     []webrtc.NetworkType
+	root             string
+	backendURL       string
+	webSocketURL     string
+	projectID        string
+	databaseURL      string
+	credentials      string
+	sctpCC           string
 }
 
 func main() {
@@ -104,13 +107,22 @@ func main() {
 	flag.StringVar(&portList, "ports", yurirtcEnv("PORTS", defaultICEPorts), "comma-separated ports for both UDP and TCP listeners")
 	flag.IntVar(&legacyPort, "port", 0, "deprecated single-port override (takes precedence over -ports)")
 	flag.StringVar(&opt.root, "root", yurirtcEnv("ROOT", "/var/lib/yurirtc/site"), "directory served as the site root")
+	flag.StringVar(&opt.cacheRules, "cache-rules", yurirtcEnv("CACHE_RULES", ""), "optional JSON static cache policy rules")
 	flag.StringVar(&opt.backendURL, "backend", yurirtcEnv("BACKEND", "http://127.0.0.1:1801"), "HTTP backend for /apiv2/")
 	flag.StringVar(&opt.webSocketURL, "websocket-backend", yurirtcEnv("WEBSOCKET_BACKEND", ""), "websocket upstream for carried sockets under /apiv2/, e.g. ws://127.0.0.1:1802; empty disables them")
 	flag.StringVar(&opt.projectID, "project", yurirtcEnv("PROJECT", ""), "Firebase project id (required)")
 	flag.StringVar(&opt.databaseURL, "database-url", yurirtcEnv("DATABASE_URL", ""), "RTDB URL (required)")
 	flag.StringVar(&opt.credentials, "credentials", yurirtcEnv("CREDENTIALS", envOr("GOOGLE_APPLICATION_CREDENTIALS", "")), "service account JSON path")
 	flag.StringVar(&opt.sctpCC, "sctp-congestion-control", yurirtcEnv("SCTP_CONGESTION_CONTROL", "cubic"), "SCTP sender congestion control: cubic or reno")
+	flag.StringVar(&opt.precompressedDir, "precompressed-dir", yurirtcEnv("PRECOMPRESSED_DIR", ""), "verified private sidecar directory")
+	flag.StringVar(&opt.precompressOut, "precompress-out", "", "generate gzip sidecars outside root and exit")
 	flag.Parse()
+	if opt.precompressOut != "" {
+		if err := GeneratePrecompressed(opt.root, opt.precompressOut); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	if opt.publicIP == "" || opt.projectID == "" || opt.databaseURL == "" {
 		log.Fatal("public-ip, project, and database-url are all required")
@@ -141,8 +153,21 @@ func main() {
 	}()
 
 	handler := NewHandler(opt.root, opt.backendURL)
+	if opt.precompressedDir != "" {
+		if err := handler.LoadPrecompressed(opt.precompressedDir); err != nil {
+			log.Fatalf("precompressed assets: %v", err)
+		}
+	}
+	if opt.cacheRules != "" {
+		if err := handler.LoadCacheRules(opt.cacheRules); err != nil {
+			log.Fatalf("cache rules: %v", err)
+		}
+	}
 	handler.WebSocketURL = strings.TrimRight(opt.webSocketURL, "/")
 	peers := newPeerRegistry()
+	if _, err := peers.certificates.get(time.Now()); err != nil {
+		log.Fatalf("server certificate: %v", err)
+	}
 	defer peers.CloseAll()
 	go peers.LogUntil(ctx)
 
@@ -427,7 +452,11 @@ func answerOffer(ctx context.Context, api *webrtc.API, handler *Handler, peers *
 	}
 	defer releaseHandshake()
 
-	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: []webrtc.ICEServer{}})
+	certificate, err := peers.certificates.get(time.Now())
+	if err != nil {
+		return AnswerBlob{}, err
+	}
+	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: []webrtc.ICEServer{}, Certificates: []webrtc.Certificate{certificate}})
 	if err != nil {
 		return AnswerBlob{}, err
 	}

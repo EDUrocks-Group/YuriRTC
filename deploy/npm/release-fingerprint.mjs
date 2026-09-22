@@ -41,6 +41,7 @@ export async function carrierReleaseFingerprints(mode = "release", variant = "cd
     readFile(resolve(HERE, "manifest-public-key.json")),
     readFile(resolve(HERE, "package.json")),
     readFile(resolve(ROOT, "packages/loader/package.json")),
+    readFile(resolve(ROOT, "packages/protocol/src/cdn.ts")),
     readFile(resolve(ROOT, "package-lock.json"))
   ]);
   const inputs = variant === "bundled"

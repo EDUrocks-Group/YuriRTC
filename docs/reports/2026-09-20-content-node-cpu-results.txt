@@ -1,0 +1,95 @@
+yurirtc-cpu-candidates.log
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkPeerCertificateReuse/fresh-certificate-7         	    1677	    694355 ns/op	   44313 B/op	     574 allocs/op
+BenchmarkPeerCertificateReuse/fresh-certificate-7         	    1611	    742985 ns/op	   44271 B/op	     573 allocs/op
+BenchmarkPeerCertificateReuse/fresh-certificate-7         	    1623	    736867 ns/op	   44264 B/op	     573 allocs/op
+BenchmarkPeerCertificateReuse/reused-certificate-7        	    8364	    133668 ns/op	   26410 B/op	     304 allocs/op
+BenchmarkPeerCertificateReuse/reused-certificate-7        	    9736	    128909 ns/op	   26399 B/op	     304 allocs/op
+BenchmarkPeerCertificateReuse/reused-certificate-7        	    7617	    131528 ns/op	   26401 B/op	     304 allocs/op
+BenchmarkRejectedCompressionDecision/current-repeat-compression-7         	      72	  17236945 ns/op	 4678522 B/op	      14 allocs/op
+BenchmarkRejectedCompressionDecision/current-repeat-compression-7         	      63	  18231943 ns/op	 4678532 B/op	      14 allocs/op
+BenchmarkRejectedCompressionDecision/current-repeat-compression-7         	      69	  17246194 ns/op	 4678500 B/op	      13 allocs/op
+BenchmarkRejectedCompressionDecision/prototype-remember-rejection-7       	12179370	        95.85 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRejectedCompressionDecision/prototype-remember-rejection-7       	12164904	        85.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRejectedCompressionDecision/prototype-remember-rejection-7       	12888484	        91.44 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	yurirtc/content-node	16.085s
+
+
+yurirtc-server-udp.log
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkLoopbackDownload/udp/64MiB-credit64-refill8-7         	       5	1898641122 ns/op	  35.35 MB/s	       282.8 Mbps
+PASS
+ok  	yurirtc/content-node	12.498s
+
+
+yurirtc-server-tcp.log
+goos: linux
+goarch: amd64
+pkg: yurirtc/content-node
+cpu: Intel(R) Xeon(R) CPU E5-2667 v4 @ 3.20GHz
+BenchmarkLoopbackDownload/tcp/64MiB-credit64-refill8-7         	       5	2079110056 ns/op	  32.28 MB/s	       258.2 Mbps
+PASS
+ok  	yurirtc/content-node	13.598s
+
+
+yurirtc-udp-server-top.txt
+File: content-node.test
+Build ID: c0ee3999196fc3ffb511f5d5891329ac0859ca5a
+Type: cpu
+Time: 2026-09-18 20:57:15 CDT
+Duration: 12.42s, Total samples = 17200ms (138.44%)
+Active filters:
+   tagfocus=side=server
+Showing nodes accounting for 8890ms, 51.69% of 17200ms total
+Dropped 336 nodes (cum <= 86ms)
+Showing top 12 nodes out of 219
+      flat  flat%   sum%        cum   cum%
+    5040ms 29.30% 29.30%     5040ms 29.30%  internal/runtime/syscall.Syscall6
+     690ms  4.01% 33.31%     1470ms  8.55%  runtime.selectgo
+     530ms  3.08% 36.40%      530ms  3.08%  runtime.memclrNoHeapPointers
+     420ms  2.44% 38.84%      420ms  2.44%  runtime.memmove
+     400ms  2.33% 41.16%      450ms  2.62%  runtime.lock2
+     390ms  2.27% 43.43%      390ms  2.27%  crypto/internal/fips140/aes/gcm.gcmAesEnc
+     330ms  1.92% 45.35%      330ms  1.92%  internal/runtime/atomic.(*Uint32).CompareAndSwap (inline)
+     230ms  1.34% 46.69%      230ms  1.34%  runtime.nextFreeFast (inline)
+     220ms  1.28% 47.97%      240ms  1.40%  internal/sync.(*Mutex).Lock
+     220ms  1.28% 49.24%      770ms  4.48%  runtime.mallocgcSmallScanNoHeader
+     220ms  1.28% 50.52%      250ms  1.45%  runtime.unlock2
+     200ms  1.16% 51.69%      200ms  1.16%  sync/atomic.(*Int32).Add
+
+
+yurirtc-tcp-server-top.txt
+File: content-node.test
+Build ID: 44e0d157d237b601f998d7003f5b76ebd59651a7
+Type: cpu
+Time: 2026-09-18 20:57:56 CDT
+Duration: 13.53s, Total samples = 12060ms (89.13%)
+Active filters:
+   tagfocus=side=server
+Showing nodes accounting for 7020ms, 58.21% of 12060ms total
+Dropped 324 nodes (cum <= 60.30ms)
+Showing top 12 nodes out of 179
+      flat  flat%   sum%        cum   cum%
+    4610ms 38.23% 38.23%     4610ms 38.23%  internal/runtime/syscall.Syscall6
+     560ms  4.64% 42.87%      560ms  4.64%  runtime.memmove
+     280ms  2.32% 45.19%      280ms  2.32%  runtime.memclrNoHeapPointers
+     250ms  2.07% 47.26%      260ms  2.16%  runtime.lock2
+     200ms  1.66% 48.92%      200ms  1.66%  crypto/internal/fips140/aes/gcm.gcmAesEnc
+     180ms  1.49% 50.41%      650ms  5.39%  runtime.selectgo
+     170ms  1.41% 51.82%      170ms  1.41%  internal/runtime/atomic.(*Uint32).CompareAndSwap
+     170ms  1.41% 53.23%      580ms  4.81%  runtime.mallocgcSmallScanNoHeader
+     170ms  1.41% 54.64%      230ms  1.91%  runtime.mallocgcTiny
+     160ms  1.33% 55.97%      160ms  1.33%  runtime.nextFreeFast (inline)
+     140ms  1.16% 57.13%     1870ms 15.51%  runtime.mallocgc
+     130ms  1.08% 58.21%      130ms  1.08%  internal/sync.(*Mutex).Lock
+
+
+yurirtc-cpu-audit-race.log
+ok  	yurirtc/content-node	4.373s

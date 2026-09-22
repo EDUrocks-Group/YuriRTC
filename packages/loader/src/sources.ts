@@ -1,3 +1,4 @@
+import { packageUrls } from "@yurirtc/protocol";
 /**
  * Where the loader bundles are fetched from at runtime.
  *
@@ -9,7 +10,7 @@
  * The `latest` fallback exists only when this TypeScript module runs unbundled
  * in unit tests. It must not survive the public loader build.
  *
- * Two sources is also the only redundancy this path has: whichever one a
+ * The ordered mirrors provide redundancy: whichever one a
  * network permits is the one that gets used.
  */
 
@@ -21,19 +22,15 @@ export const DISTRIBUTION_VERSION =
     ? __YURIRTC_LOADER_VERSION__
     : "latest";
 
-export const CDN_BASES = [
-  `https://unpkg.com/${PACKAGE}@${DISTRIBUTION_VERSION}/dist/bundle`,
-  `https://cdn.jsdelivr.net/npm/${PACKAGE}@${DISTRIBUTION_VERSION}/dist/bundle`
-] as const;
-
-export const clientUrls = (): string[] => CDN_BASES.map((base) => `${base}/client.js`);
-export const swUrls = (): string[] => CDN_BASES.map((base) => `${base}/sw.js`);
+export const CDN_BASES = packageUrls(PACKAGE, DISTRIBUTION_VERSION, "dist/bundle");
+export const clientUrls = (): string[] => packageUrls(PACKAGE, DISTRIBUTION_VERSION, "dist/bundle/client.js");
+export const swUrls = (): string[] => packageUrls(PACKAGE, DISTRIBUTION_VERSION, "dist/bundle/sw.js");
 
 /**
  * Imports the first source that works.
  *
  * A blocked or slow CDN must degrade to the other one rather than taking the
- * page down — this is the whole reason there are two.
+ * page down.
  */
 export async function importFirst<T>(urls: readonly string[]): Promise<T> {
   const failures: string[] = [];

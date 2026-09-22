@@ -20,6 +20,8 @@ export interface GoodputMonitorOptions {
 }
 
 export interface YuriRTCConfig {
+  /** Memory mode avoids durable cookie storage; worker termination logs out. */
+  session?: { storage?: "persistent" | "memory" };
   firebase: {
     apiKey: string;
     projectId: string;

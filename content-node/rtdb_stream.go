@@ -51,8 +51,9 @@ func firebaseRTDBRedirect(req *http.Request, via []*http.Request) error {
 
 // RTDBOfferEvent is one complete offer observed under /signal/{uid}/offer.
 type RTDBOfferEvent struct {
-	UID   string
-	Offer OfferBlob
+	UID     string
+	Session string
+	Offer   OfferBlob
 }
 
 // RTDBOfferStream consumes one authenticated Realtime Database REST stream.
@@ -280,6 +281,9 @@ func offersFromRTDBEnvelope(path string, data json.RawMessage) ([]RTDBOfferEvent
 	}
 
 	parts := splitRTDBStreamPath(path)
+	if len(parts) >= 2 && parts[1] == "sessions" {
+		return sessionOffersFromRTDB(parts, data), nil
+	}
 	switch {
 	case len(parts) == 0:
 		return offersFromRTDBRoot(data)
@@ -309,6 +313,10 @@ func offersFromRTDBRoot(data json.RawMessage) ([]RTDBOfferEvent, error) {
 	offers := make([]RTDBOfferEvent, 0)
 	for key, child := range children {
 		parts := splitRTDBStreamPath(key)
+		if len(parts) >= 2 && parts[1] == "sessions" {
+			offers = append(offers, sessionOffersFromRTDB(parts, child)...)
+			continue
+		}
 		switch {
 		case len(parts) == 1:
 			offers = append(offers, offerFromRTDBNode(parts[0], child)...)
@@ -324,17 +332,19 @@ func offerFromRTDBNode(uid string, data json.RawMessage) []RTDBOfferEvent {
 		return nil
 	}
 	var node struct {
-		Offer  json.RawMessage `json:"offer"`
-		Answer json.RawMessage `json:"answer"`
+		Offer    json.RawMessage `json:"offer"`
+		Answer   json.RawMessage `json:"answer"`
+		Sessions json.RawMessage `json:"sessions"`
 	}
 	if err := json.Unmarshal(data, &node); err != nil {
 		return nil
 	}
+	offers := sessionOffersFromRTDB([]string{uid, "sessions"}, node.Sessions)
 	answer := bytes.TrimSpace(node.Answer)
 	if len(answer) > 0 && !bytes.Equal(answer, []byte("null")) {
-		return nil // an initial snapshot can contain answers awaiting cleanup
+		return offers // an initial snapshot can contain answers awaiting cleanup
 	}
-	return offerFromRTDBValue(uid, node.Offer)
+	return append(offers, offerFromRTDBValue(uid, node.Offer)...)
 }
 
 func offerFromRTDBValue(uid string, data json.RawMessage) []RTDBOfferEvent {
@@ -351,4 +361,42 @@ func offerFromRTDBValue(uid string, data json.RawMessage) []RTDBOfferEvent {
 
 func validRTDBStreamUID(uid string) bool {
 	return uid != "" && len(uid) <= maxRTDBStreamUIDBytes && !strings.Contains(uid, "/")
+}
+
+// Sessions are immutable exchange namespaces. Ignore partial writes and answers.
+func sessionOffersFromRTDB(parts []string, data json.RawMessage) []RTDBOfferEvent {
+	if len(parts) < 2 || !validRTDBStreamUID(parts[0]) {
+		return nil
+	}
+	if len(parts) == 2 {
+		var sessions map[string]json.RawMessage
+		if json.Unmarshal(data, &sessions) != nil {
+			return nil
+		}
+		var out []RTDBOfferEvent
+		for id, value := range sessions {
+			out = append(out, sessionOffersFromRTDB([]string{parts[0], "sessions", id}, value)...)
+		}
+		return out
+	}
+	id := parts[2]
+	if len(id) != 32 {
+		return nil
+	}
+	for _, c := range id {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return nil
+		}
+	}
+	var offers []RTDBOfferEvent
+	if len(parts) == 3 {
+		offers = offerFromRTDBNode(parts[0], data)
+	}
+	if len(parts) == 4 && parts[3] == "offer" {
+		offers = offerFromRTDBValue(parts[0], data)
+	}
+	for i := range offers {
+		offers[i].Session = id
+	}
+	return offers
 }

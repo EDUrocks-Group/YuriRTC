@@ -2,6 +2,8 @@ import type { FirestoreConfig, RtdbConfig } from "@yurirtc/signaling";
 import type { GoodputMonitorOptions } from "./adaptive-transport.js";
 
 export interface YuriRTCConfig {
+  /** Memory mode avoids durable cookie storage; worker termination logs out. */
+  session?: { storage?: "persistent" | "memory" };
   /** Public by design; the security rules enforce access, not the key. */
   firebase: {
     apiKey: string;
@@ -118,10 +120,11 @@ export function resolveConfig(partial: YuriRTCConfig): YuriRTCConfig {
         .filter((value): value is string => typeof value === "string")
         .map((value) => value.trim())
         .filter((value) => value.length > 0 && value.length <= 2048))]
-        .slice(0, 4)
+        .slice(0, 8)
     : [];
   return {
     firebase: partial.firebase,
+    ...(partial.session ? { session: partial.session } : {}),
     cache: {
       lruBudgetBytes: partial.cache?.lruBudgetBytes ?? DEFAULT_CACHE.budgetBytes,
       maxQuotaShare: partial.cache?.maxQuotaShare ?? DEFAULT_CACHE.maxQuotaShare

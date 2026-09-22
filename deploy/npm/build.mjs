@@ -1,3 +1,4 @@
+import { packageUrls } from "../../packages/protocol/src/cdn.ts";
 import { createHash, createPublicKey } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -13,6 +14,8 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "../..");
 const release = process.argv.includes("--release");
+const sessionStorageMode = process.env.YURIRTC_SESSION_STORAGE ?? "persistent";
+if (!["persistent", "memory"].includes(sessionStorageMode)) throw new Error("YURIRTC_SESSION_STORAGE must be persistent or memory");
 const bundledLoader = process.argv.includes("--bundled-loader");
 const outputArgument = process.argv.indexOf("--out-dir");
 if (outputArgument >= 0 && !process.argv[outputArgument + 1]) {
@@ -290,6 +293,7 @@ async function buildIndex() {
     .replace("__YURIRTC_CONFIG__", jsonForScript({
       firebase,
       cache: {},
+      session: { storage: sessionStorageMode },
       signal: testFirestoreBaseUrl
         ? { firestore: { baseUrl: testFirestoreBaseUrl } }
         : {}
@@ -366,10 +370,9 @@ async function buildWorker() {
     await writeFile(resolve(outputDirectory, "sw.js"), `${output}\n`, "utf8");
     return Buffer.byteLength(output);
   }
-  const cdnBases = testWorkerCdnBase ? [testWorkerCdnBase] : [
-    `https://cdn.jsdelivr.net/npm/@advwebrec/grainloading`,
-    `https://unpkg.com/@advwebrec/grainloading`
-  ];
+  const cdnBases = testWorkerCdnBase
+    ? [testWorkerCdnBase + "@VERSION/dist/bundle/sw.js"]
+    : packageUrls("@advwebrec/grainloading", "VERSION", "dist/bundle/sw.js");
   // No version is substituted: the stub imports the moving `@latest` bundle so
   // an uploaded copy keeps receiving loader updates. A version baked in here is
   // what silently froze every carrier once the resolver that was meant to

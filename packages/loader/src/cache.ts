@@ -12,13 +12,25 @@
  *    the browser's blunt instrument.
  */
 
+import { cacheTags, CACHE_DIRECTIVE_HEADER } from "./cache-policy.js";
 import { CACHE_PREFIX, DEFAULT_CACHE, cacheNames } from "./config.js";
 import { sharedIdb } from "./idb.js";
 import type { CachePolicy } from "./routing.js";
 
 /** Set once at worker start from the version in this worker's own URL. */
 let names = cacheNames("0");
+let cacheEpoch = 0;
+const writes = new Set<Promise<unknown>>();
+let invalidation: Promise<void> = Promise.resolve();
+export const currentCacheEpoch = (): number => cacheEpoch;
+export const cacheInvalidationDone = (): Promise<void> => invalidation.catch(() => undefined);
+function trackWrite<T>(operation: Promise<T>): Promise<T> {
+  writes.add(operation);
+  void operation.finally(() => writes.delete(operation)).catch(() => undefined);
+  return operation;
+}
 export function useVersion(version: string): void {
+  cacheEpoch += 1;
   names = cacheNames(version);
   dropOpenCaches();
 }
@@ -114,6 +126,7 @@ function cacheControlDirectives(headers: Headers): Set<string> {
  */
 export function responseMayBeStored(request: Request, response: Response): boolean {
   if (request.method !== "GET" || request.cache === "no-store") return false;
+  if (/^(no-store|never)$/i.test(response.headers.get(CACHE_DIRECTIVE_HEADER)?.trim() ?? "")) return false;
   if (request.headers.has("authorization") || request.headers.has("range")) return false;
   if (!response.ok || response.status === 204 || response.status === 205 || response.status === 206) {
     return false;
@@ -132,6 +145,7 @@ export function responseMayBeStored(request: Request, response: Response): boole
 /** A fresh answer which makes any older stored representation unsafe/invalid. */
 export function responseForbidsStoredFallback(response: Response): boolean {
   if (response.status === 404 || response.status === 410) return true;
+  if (/^(no-store|never)$/i.test(response.headers.get(CACHE_DIRECTIVE_HEADER)?.trim() ?? "")) return true;
   const directives = cacheControlDirectives(response.headers);
   if (directives.has("no-store") || directives.has("private")) return true;
   return (response.headers.get("vary") ?? "")
@@ -157,7 +171,7 @@ export function cachedResponseIsFresh(response: Response, now = Date.now()): boo
   // representation stale. no-cache, despite its name, requires validation on
   // every use and is therefore handled differently.
   if (directives.has("no-cache")) return false;
-  if (directives.has("immutable")) return true;
+  if (directives.has("immutable") && !response.headers.has("date") && !response.headers.has("expires")) return true;
 
   const maxAge = numericDirective(response.headers, "max-age");
   const date = Date.parse(response.headers.get("date") ?? "");
@@ -616,7 +630,8 @@ export async function putBounded(
   request: Request,
   response: Response,
   policy: CachePolicy,
-  config: CacheBudget = DEFAULT_CACHE
+  config: CacheBudget = DEFAULT_CACHE,
+  epoch = cacheEpoch
 ): Promise<void> {
   const cacheName = cacheNameFor(policy);
   if (!cacheName || !responseMayBeStored(request, response)) return;
@@ -631,7 +646,7 @@ export async function putBounded(
   const body = await response.blob().catch(() => null);
   if (!body) return;
 
-  await putBodyBounded(request, body, response, policy, config);
+  await trackWrite(putBodyBounded(request, body, response, policy, config, epoch));
 }
 
 async function putBodyBounded(
@@ -639,8 +654,10 @@ async function putBodyBounded(
   body: Blob,
   response: Pick<Response, "status" | "statusText" | "headers">,
   policy: CachePolicy,
-  config: CacheBudget
+  config: CacheBudget,
+  epoch: number
 ): Promise<void> {
+  if (epoch !== cacheEpoch) return;
   const cacheName = cacheNameFor(policy);
   if (!cacheName) return;
   const bounded = policy === "cache-first-lru" || policy === "revalidate-lru";
@@ -656,6 +673,7 @@ async function putBodyBounded(
     const cachePromise = openCache(cacheName);
     if (bounded) await ensureRoom(config);
     const cache = await cachePromise;
+    if (epoch !== cacheEpoch) return;
     await cache.put(request, new Response(body, {
       status: response.status,
       statusText: response.statusText,
@@ -693,7 +711,9 @@ export function cacheWhileConsumed(
   request: Request,
   response: Response,
   policy: CachePolicy,
-  config: CacheBudget = DEFAULT_CACHE
+  config: CacheBudget = DEFAULT_CACHE,
+  epoch = cacheEpoch,
+  keepAlive?: (work: Promise<void>) => void
 ): Response {
   if (!responseMayBeStored(request, response)) return response;
   if (
@@ -708,6 +728,9 @@ export function cacheWhileConsumed(
   // an empty URL); preserve any other response exactly by declining to wrap it.
   if (response.url !== "" || response.redirected || response.type !== "default") return response;
 
+  let completed!: () => void;
+  const completion = new Promise<void>(resolve => { completed = resolve; });
+  keepAlive?.(completion);
   const metadata = {
     status: response.status,
     statusText: response.statusText,
@@ -734,6 +757,7 @@ export function cacheWhileConsumed(
     retainForCache = false;
     retainedBytes = 0;
     chunks = [];
+    completed();
   };
   const removeAbort = (): void => {
     request.signal.removeEventListener("abort", onAbort);
@@ -779,7 +803,7 @@ export function cacheWhileConsumed(
         stopped = true;
         removeAbort();
         controller.close();
-        if (!retainForCache) return;
+        if (!retainForCache) { completed(); return; }
 
         // Blob joins the pieces in the blob store rather than building a
         // second contiguous copy on this worker's heap.
@@ -793,7 +817,7 @@ export function cacheWhileConsumed(
         }
         chunks = [];
         retainedBytes = 0;
-        void putBodyBounded(request, body, metadata, policy, config);
+        void trackWrite(putBodyBounded(request, body, metadata, policy, config, epoch)).finally(completed);
         return;
       }
 
@@ -860,18 +884,41 @@ export async function purgeStale(keep: readonly string[]): Promise<void> {
   }
 }
 
-/** Everything, for the site's CLEAR_CACHE / CLEAR_ALL_CACHE messages. */
-export async function clearAllCaches(): Promise<void> {
-  // The table describes caches that are about to stop existing.
-  metaGeneration += 1;
-  pendingUses.clear();
-  lruBytes = 0;
-  totalStale = true;
-  const existing = await caches.keys();
-  try {
-    await Promise.all(existing.map((name) => caches.delete(name)));
-    await meta.request("readwrite", (store) => store.clear()).catch(() => undefined);
-  } finally {
-    dropOpenCaches();
-  }
+/** Acknowledge only after pending writes and deletions finish. In-flight
+ * responses from an older epoch can still display, but cannot repopulate cache. */
+export function invalidateCaches(tags?: readonly string[], urls?: readonly string[]): Promise<void> {
+  cacheEpoch += 1;
+  const activeWrites = [...writes];
+  invalidation = invalidation.catch(() => undefined).then(async () => {
+    await Promise.allSettled(activeWrites);
+    metaGeneration += 1;
+    pendingUses.clear();
+    lruBytes = 0;
+    totalStale = true;
+    const existing = (await caches.keys()).filter(name => name.startsWith(CACHE_PREFIX));
+    try {
+      if (!tags && !urls) {
+        await Promise.all(existing.map(name => caches.delete(name)));
+      } else {
+        const wantedTags = new Set(tags);
+        const wantedUrls = new Set(urls);
+        for (const name of existing) {
+          const cache = await caches.open(name);
+          for (const request of await cache.keys()) {
+            const response = await cache.match(request);
+            if (wantedUrls.has(request.url) || (response && cacheTags(response.headers).some(tag => wantedTags.has(tag)))) {
+              await cache.delete(request);
+              await forgetEntry(request.url);
+            }
+          }
+        }
+      }
+      if (!tags && !urls) await meta.request("readwrite", store => store.clear()).catch(() => undefined);
+    } finally { dropOpenCaches(); }
+  });
+  return invalidation;
+}
+
+export function clearAllCaches(): Promise<void> {
+  return invalidateCaches();
 }

@@ -15,7 +15,8 @@ import {
   SignalBackend,
   SignalError,
   abortPromise,
-  isAbort
+  isAbort,
+  randomId
 } from "./types.js";
 
 export interface RtdbConfig {
@@ -72,16 +73,16 @@ export class RtdbBackend implements SignalBackend {
     const operation = new AbortController();
     const active = anySignal([combined, operation.signal]);
 
-    // The identity is deliberately reused, so replace the complete branch
-    // before opening the stream. That atomically removes any answer left from a
-    // prior connection; the EventSource's initial snapshot still catches an
-    // answer the node writes between this PUT and stream establishment.
+    // A separate exchange path preserves cached identity reuse without sharing
+    // answers between tabs, retries, or an adaptive TCP replacement.
+    const exchangeId = randomId(16);
+    const branch = `${base}/signal/${localId}/sessions/${exchangeId}`;
     const write = await fetch(
-      `${base}/signal/${localId}.json?auth=${auth}&print=silent`,
+      `${branch}/offer.json?auth=${auth}&print=silent`,
       {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ offer }),
+        body: JSON.stringify(offer),
         signal: active
       }
     );
@@ -94,7 +95,7 @@ export class RtdbBackend implements SignalBackend {
     }
 
     const answer = this.awaitAnswer(
-      `${base}/signal/${localId}/answer.json?auth=${auth}`,
+      `${branch}/answer.json?auth=${auth}`,
       active
     );
 
@@ -265,9 +266,13 @@ export class RtdbBackend implements SignalBackend {
         }
         if (envelope.data === null || envelope.data === undefined) return;
         const answer = envelope.data as AnswerBlob;
-        if (typeof answer.sdp !== "string" || !Array.isArray(answer.candidates)) return;
+        if (typeof answer.sdp !== "string") return;
+        // RTDB removes empty arrays on write. Non-trickle answers intentionally
+        // carry all ICE candidates in SDP, so a missing candidates leaf is []
+        // rather than an invalid answer. Do not accept other malformed shapes.
+        if (answer.candidates != null && !Array.isArray(answer.candidates)) return;
         close();
-        resolve(answer);
+        resolve({ ...answer, candidates: answer.candidates ?? [] });
       };
 
       source.addEventListener("put", onPayload as EventListener);

@@ -243,3 +243,25 @@ func writeRTDBSSEFrame(t *testing.T, w io.Writer, event, path string, data any) 
 		t.Fatal(err)
 	}
 }
+
+func TestRTDBSessionPathsIsolateConcurrentExchanges(t *testing.T) {
+	const first = "0123456789abcdef0123456789abcdef"
+	const second = "1123456789abcdef0123456789abcdef"
+	for _, path := range []string{"/user/sessions/" + first + "/offer", "/user/sessions/" + second + "/offer"} {
+		offers, err := offersFromRTDBEnvelope(path, json.RawMessage(`{"sessionId":"shared-dedupe","sdp":"v=0"}`))
+		if err != nil || len(offers) != 1 || offers[0].UID != "user" || offers[0].Session == "" {
+			t.Fatalf("%s: %+v %v", path, offers, err)
+		}
+	}
+	snapshot := json.RawMessage(`{"user":{"sessions":{"` + first + `":{"offer":{"sessionId":"one","sdp":"v=0"}},"` + second + `":{"offer":{"sessionId":"two","sdp":"v=0"},"answer":{"sdp":"done"}}}}}`)
+	offers, err := offersFromRTDBEnvelope("/", snapshot)
+	if err != nil || len(offers) != 1 || offers[0].Session != first {
+		t.Fatalf("snapshot: %+v %v", offers, err)
+	}
+	for _, path := range []string{"/user/sessions/invalid/offer", "/user/sessions/" + first + "/answer", "/user/sessions/" + first + "/offer/sdp"} {
+		offers, _ := offersFromRTDBEnvelope(path, json.RawMessage(`{"sessionId":"bad","sdp":"v=0"}`))
+		if len(offers) != 0 {
+			t.Fatalf("unexpected offer at %s", path)
+		}
+	}
+}

@@ -5,11 +5,15 @@ on:
     paths:
       - "content-node/**"
       - "third_party/pion-sctp/**"
+      - "third_party/pion-dtls/**"
+      - "third_party/pion-transport/**"
       - ".github/workflows/transport-wan.yml"
   push:
     paths:
       - "content-node/**"
       - "third_party/pion-sctp/**"
+      - "third_party/pion-dtls/**"
+      - "third_party/pion-transport/**"
       - ".github/workflows/transport-wan.yml"
   workflow_dispatch:
     inputs:

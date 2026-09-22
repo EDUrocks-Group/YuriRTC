@@ -1,3 +1,4 @@
+import { packageUrls } from "../protocol/src/cdn.ts";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
@@ -113,12 +114,9 @@ if (
 ) {
   throw new Error("loader.json does not identify the exact local loader build");
 }
-const expectedUrls = [
-  `https://cdn.jsdelivr.net/npm/@advwebrec/grainloading@${loaderPackage.version}/dist/bundle/client.js`,
-  `https://unpkg.com/@advwebrec/grainloading@${loaderPackage.version}/dist/bundle/client.js`
-];
+const expectedUrls = packageUrls("@advwebrec/grainloading", loaderPackage.version, "dist/bundle/client.js");
 if (JSON.stringify(payload.loader.urls) !== JSON.stringify(expectedUrls)) {
-  throw new Error("loader.json does not contain both immutable loader CDN URLs");
+  throw new Error("loader.json does not contain the ordered immutable loader CDN URLs");
 }
 
 if (!manifestOnly) {

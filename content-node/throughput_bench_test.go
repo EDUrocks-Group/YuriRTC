@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"sync"
@@ -212,6 +213,39 @@ func BenchmarkAsyncRequestBodyForwarding(b *testing.B) {
 				body.end()
 				if err := test.forward(body); err != nil {
 					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// Isolates encoder workspace reuse from network noise, with identical input
+// and output bytes. Run both alternatives in the same process.
+func BenchmarkWireGzipWorkspace(b *testing.B) {
+	data := bytes.Repeat([]byte(`{"game":"fixture","assets":["texture.png","level.data","engine.wasm"]}`), 16000)
+	for _, pooled := range []bool{false, true} {
+		name := "fresh"
+		if pooled {
+			name = "pooled"
+		}
+		b.Run(name, func(b *testing.B) {
+			b.SetBytes(int64(len(data)))
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				var writer *gzip.Writer
+				if pooled {
+					writer = acquireWireGzipWriter(io.Discard)
+				} else {
+					writer, _ = gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+				}
+				if _, err := writer.Write(data); err != nil {
+					b.Fatal(err)
+				}
+				if err := writer.Close(); err != nil {
+					b.Fatal(err)
+				}
+				if pooled {
+					releaseWireGzipWriter(writer)
 				}
 			}
 		})

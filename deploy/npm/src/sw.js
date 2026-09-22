@@ -4,14 +4,14 @@
 // Worker bytes are deliberately outside the carrier's client-integrity check.
 var workerCdnBases = __YURIRTC_WORKER_CDN_BASES__;
 var loaderVersion = new URL(self.location.href).searchParams.get("yurirtc-loader");
-if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(loaderVersion || "")) {
+if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(loaderVersion || "")) {
   throw new Error("YuriRTC: no valid pinned worker version");
 }
 
 var loaded = false;
 for (var index = 0; index < workerCdnBases.length; index += 1) {
   try {
-    importScripts(workerCdnBases[index] + "@" + loaderVersion + "/dist/bundle/sw.js");
+    importScripts(workerCdnBases[index].replace("@VERSION/", "@" + loaderVersion + "/"));
     loaded = true;
     break;
   } catch (error) {

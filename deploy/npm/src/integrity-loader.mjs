@@ -1,13 +1,12 @@
+import { packageUrls } from "../../../packages/protocol/src/cdn.ts";
+
 const MANIFEST_LIMIT = 64 * 1024;
 const LOADER_LIMIT = 8 * 1024 * 1024;
 const DEFAULT_ATTEMPT_TIMEOUT_MS = 15_000;
 const MANIFEST_PACKAGE = "shaintloadingcheckpak";
 const HIGHEST_VERSION_STORAGE_KEY = "yurirtc.loader.highest-verified-version";
 
-export const manifestUrls = [
-  `https://cdn.jsdelivr.net/npm/${MANIFEST_PACKAGE}@latest/loader.json`,
-  `https://unpkg.com/${MANIFEST_PACKAGE}@latest/loader.json`
-];
+export const manifestUrls = packageUrls(MANIFEST_PACKAGE, "latest", "loader.json");
 
 export class LoaderResolutionError extends Error {
   constructor(code, options = {}) {
@@ -39,10 +38,7 @@ function encodeBase64url(value) {
 }
 
 function exactLoaderUrls(version) {
-  return [
-    `https://cdn.jsdelivr.net/npm/@advwebrec/grainloading@${version}/dist/bundle/client.js`,
-    `https://unpkg.com/@advwebrec/grainloading@${version}/dist/bundle/client.js`
-  ];
+  return packageUrls("@advwebrec/grainloading", version, "dist/bundle/client.js");
 }
 
 function parseSemVer(value) {
@@ -102,14 +98,18 @@ export function validatePayload(payload) {
     throw new Error("manifest loader SHA-256 is invalid");
   }
   const expectedUrls = exactLoaderUrls(loader.version);
-  if (!Array.isArray(loader.urls) || loader.urls.length !== expectedUrls.length ||
-      loader.urls.some((url, index) => url !== expectedUrls[index])) {
+  // Accept already-published two-source manifests during rollout. The signed
+  // package/version/hash authenticate identical bytes from the new mirrors too.
+  const legacyUrls = [expectedUrls[1], expectedUrls[0]];
+  const matches = urls => Array.isArray(loader.urls) && loader.urls.length === urls.length &&
+    loader.urls.every((url, index) => url === urls[index]);
+  if (!matches(expectedUrls) && !matches(legacyUrls)) {
     throw new Error("manifest loader URLs are not the expected immutable CDN URLs");
   }
   return {
     package: loader.package,
     version: loader.version,
-    urls: [...loader.urls],
+    urls: expectedUrls,
     sha256: loader.sha256
   };
 }

@@ -157,7 +157,7 @@ function installFakeEventSource(): () => void {
   };
 }
 
-test("RTDB atomically replaces a reused identity branch before streaming the answer", async () => {
+test("RTDB writes an isolated offer leaf and accepts an answer whose empty candidates array was removed", async () => {
   const originalFetch = globalThis.fetch;
   const restoreEventSource = installFakeEventSource();
   const order: string[] = [];
@@ -178,9 +178,9 @@ test("RTDB atomically replaces a reused identity branch before streaming the ans
     putUrl = url;
     order.push("write");
     assert.equal(FakeEventSource.instances.length, 0, "stale answers must be replaced first");
-    assert.deepEqual(JSON.parse(String(init?.body)), { offer });
+    assert.deepEqual(JSON.parse(String(init?.body)), offer);
     setTimeout(() => {
-      FakeEventSource.instances[0]!.emit("put", { path: "/", data: answer });
+      FakeEventSource.instances[0]!.emit("put", { path: "/", data: { sdp: answer.sdp } });
     }, 0);
     return new Response(null, { status: 204 });
   }) as typeof fetch;
@@ -195,7 +195,7 @@ test("RTDB atomically replaces a reused identity branch before streaming the ans
   }
 
   assert.deepEqual(order, ["write"]);
-  assert.match(putUrl, /\/signal\/uid\.json\?/);
+  assert.match(putUrl, /\/signal\/uid\/sessions\/[a-f0-9]{32}\/offer\.json\?/);
   assert.match(putUrl, /[?&]print=silent(?:&|$)/);
   assert.equal(FakeEventSource.instances[0]!.closed, true);
 });

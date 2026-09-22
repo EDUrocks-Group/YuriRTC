@@ -33,6 +33,7 @@ const (
 	maxWireGzipCacheEntryBytes  = 8 * 1024 * 1024
 	maxWireGzipCacheBytes       = 64 * 1024 * 1024
 	maxWireGzipCacheBuilds      = 4
+	maxWireGzipCacheEntries     = 4096
 )
 
 type wireGzipCacheKey struct {
@@ -44,6 +45,7 @@ type wireGzipCacheKey struct {
 type wireGzipCacheEntry struct {
 	key  wireGzipCacheKey
 	data []byte
+	use  bool
 }
 
 type wireGzipFlight struct {
@@ -61,6 +63,7 @@ type wireGzipCache struct {
 	used    int64
 	lru     *list.List
 	entries map[wireGzipCacheKey]*list.Element
+	paths   map[string]wireGzipCacheKey
 	flights map[wireGzipCacheKey]*wireGzipFlight
 	builds  chan struct{}
 }
@@ -69,6 +72,7 @@ func newWireGzipCache() *wireGzipCache {
 	return &wireGzipCache{
 		lru:     list.New(),
 		entries: make(map[wireGzipCacheKey]*list.Element),
+		paths:   make(map[string]wireGzipCacheKey),
 		flights: make(map[wireGzipCacheKey]*wireGzipFlight),
 		builds:  make(chan struct{}, maxWireGzipCacheBuilds),
 	}
@@ -79,12 +83,15 @@ func (c *wireGzipCache) load(
 	key wireGzipCacheKey,
 	build func() ([]byte, bool, error),
 ) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	c.mu.Lock()
 	if element := c.entries[key]; element != nil {
 		c.lru.MoveToFront(element)
-		data := element.Value.(*wireGzipCacheEntry).data
+		entry := element.Value.(*wireGzipCacheEntry)
 		c.mu.Unlock()
-		return data, true, nil
+		return entry.data, entry.use, nil
 	}
 	if flight := c.flights[key]; flight != nil {
 		c.mu.Unlock()
@@ -108,8 +115,8 @@ func (c *wireGzipCache) load(
 	}
 
 	c.mu.Lock()
-	if flight.err == nil && flight.use {
-		c.storeLocked(key, flight.data)
+	if flight.err == nil && ctx.Err() == nil {
+		c.storeResultLocked(key, flight.data, flight.use)
 	}
 	delete(c.flights, key)
 	close(flight.done)
@@ -117,42 +124,56 @@ func (c *wireGzipCache) load(
 	return flight.data, flight.use, flight.err
 }
 
-func (c *wireGzipCache) storeLocked(key wireGzipCacheKey, data []byte) {
-	if len(data) == 0 || len(data) > maxWireGzipCacheEntryBytes {
+func (c *wireGzipCache) removeLocked(element *list.Element) {
+	entry := element.Value.(*wireGzipCacheEntry)
+	c.used -= int64(len(entry.data))
+	delete(c.entries, entry.key)
+	delete(c.paths, entry.key.path)
+	c.lru.Remove(element)
+}
+
+func (c *wireGzipCache) storeResultLocked(key wireGzipCacheKey, data []byte, use bool) {
+	// Oversized successful results must still be compressed, never remembered
+	// as a rejection. Negative decisions carry no payload but consume an entry.
+	if use && (len(data) == 0 || len(data) > maxWireGzipCacheEntryBytes) {
 		return
 	}
-	// A changed file at the same path must not retain its predecessor merely
-	// because the total budget has room for both identities.
-	for candidate, element := range c.entries {
-		if candidate.path != key.path || candidate == key {
-			continue
-		}
-		entry := element.Value.(*wireGzipCacheEntry)
-		c.used -= int64(len(entry.data))
-		delete(c.entries, candidate)
-		c.lru.Remove(element)
+	if !use {
+		data = nil
 	}
-	entry := &wireGzipCacheEntry{key: key, data: data}
+	if oldKey, ok := c.paths[key.path]; ok {
+		c.removeLocked(c.entries[oldKey])
+	}
+	entry := &wireGzipCacheEntry{key: key, data: data, use: use}
 	c.entries[key] = c.lru.PushFront(entry)
+	c.paths[key.path] = key
 	c.used += int64(len(data))
-	for c.used > maxWireGzipCacheBytes {
-		oldest := c.lru.Back()
-		if oldest == nil {
-			break
-		}
-		entry := oldest.Value.(*wireGzipCacheEntry)
-		c.used -= int64(len(entry.data))
-		delete(c.entries, entry.key)
-		c.lru.Remove(oldest)
+	for c.used > maxWireGzipCacheBytes || len(c.entries) > maxWireGzipCacheEntries {
+		c.removeLocked(c.lru.Back())
 	}
+}
+
+// Reuse the ~1 MiB DEFLATE workspace across cache misses and large streams.
+// Reset severs references to request state before returning an encoder.
+var wireGzipWriters = sync.Pool{New: func() any {
+	writer, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+	return writer
+}}
+
+func acquireWireGzipWriter(out io.Writer) *gzip.Writer {
+	writer := wireGzipWriters.Get().(*gzip.Writer)
+	writer.Reset(out)
+	return writer
+}
+func releaseWireGzipWriter(writer *gzip.Writer) {
+	writer.Reset(io.Discard)
+	wireGzipWriters.Put(writer)
 }
 
 func compressWireGzip(src io.Reader, length int64) ([]byte, bool, error) {
 	var encoded bytes.Buffer
-	writer, err := gzip.NewWriterLevel(&encoded, gzip.BestSpeed)
-	if err != nil {
-		return nil, false, err
-	}
+	writer := acquireWireGzipWriter(&encoded)
+	defer releaseWireGzipWriter(writer)
 	written, copyErr := io.Copy(writer, io.LimitReader(src, length))
 	closeErr := writer.Close()
 	if copyErr != nil {
@@ -237,10 +258,8 @@ func streamEncodedBytes(ctx context.Context, out responseSender, id uint32, data
 
 func streamWireGzip(ctx context.Context, out responseSender, id uint32, src io.Reader, length int64) error {
 	destination := &wireBodyWriter{ctx: ctx, out: out, id: id, pending: make([]byte, 0, maxPayloadBytes)}
-	writer, err := gzip.NewWriterLevel(destination, gzip.BestSpeed)
-	if err != nil {
-		return err
-	}
+	writer := acquireWireGzipWriter(destination)
+	defer releaseWireGzipWriter(writer)
 	buffer := streamBufferPool.Get().([]byte)
 	written, copyErr := io.CopyBuffer(writer, io.LimitReader(src, length), buffer)
 	streamBufferPool.Put(buffer[:proxyBufferBytes])

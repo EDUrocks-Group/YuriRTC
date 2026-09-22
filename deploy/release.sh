@@ -274,20 +274,34 @@ verify_tarball_exact "$loader_tarball" packages/loader \
   dist/bundle/client.js dist/bundle/sw.js dist/bundle/sw-stub.js \
   dist/types/index.d.ts dist/assets/rot13.woff dist/assets/OFL.txt
 
-for base in \
-  "https://cdn.jsdelivr.net/npm/$LOADER_NAME@$LOADER_VERSION" \
-  "https://unpkg.com/$LOADER_NAME@$LOADER_VERSION"; do
-  wait_for_exact_cdn_asset "$base/dist/bundle/client.js" packages/loader/dist/bundle/client.js javascript
-  wait_for_exact_cdn_asset "$base/dist/bundle/sw.js" packages/loader/dist/bundle/sw.js javascript
-  wait_for_exact_cdn_asset "$base/dist/bundle/sw-stub.js" packages/loader/dist/bundle/sw-stub.js javascript
-  wait_for_exact_cdn_asset "$base/dist/assets/rot13.woff" packages/loader/dist/assets/rot13.woff font
+# Use the same ordered raw-file URLs as the runtime, including esm.sh's
+# raw query: transformed modules cannot satisfy the signed byte hashes.
+for asset in dist/bundle/client.js dist/bundle/sw.js dist/bundle/sw-stub.js dist/assets/rot13.woff; do
+  kind=javascript
+  [[ "$asset" == *.woff ]] && kind=font
+  mapfile -t urls < <(node --input-type=module - "$LOADER_NAME" "$LOADER_VERSION" "$asset" <<'JS'
+import { packageUrls } from './packages/protocol/src/cdn.ts';
+console.log(packageUrls(...process.argv.slice(2)).join('\n'));
+JS
+  )
+  [[ "${#urls[@]}" == 5 ]] || { echo "expected five runtime CDN URLs" >&2; exit 1; }
+  for url in "${urls[@]}"; do
+    wait_for_exact_cdn_asset "$url" "packages/loader/$asset" "$kind"
+  done
 done
-echo "verified live loader $LOADER_NAME@$LOADER_VERSION on npm, jsDelivr, and unpkg"
+echo "verified live loader $LOADER_NAME@$LOADER_VERSION on npm and all five runtime CDNs"
 
 if ! version_exists "$POINTER_NAME" "$POINTER_VERSION"; then
+  # Older carriers only accept the signed two-source list. Moving latest to
+  # a five-source pointer before upgrading active carriers would break them.
+  if [[ "${YURIRTC_CARRIER_UPGRADE_OK:-}" != "1" ]]; then
+    echo "refusing the five-CDN pointer until active carriers have been upgraded and verified" >&2
+    echo "set YURIRTC_CARRIER_UPGRADE_OK=1 only after verifying those deployments" >&2
+    exit 1
+  fi
   pointer_listing="$(npm_stage_for_token "$NPM_INTEGRITY_TOKEN" stage list "$POINTER_NAME" --json)"
   if ! stage_listing_has_version "$POINTER_VERSION" <<<"$pointer_listing"; then
-    # Sign only after every immutable loader runtime asset is live on both CDNs.
+    # Sign only after every immutable loader runtime asset is live on all five CDNs.
     YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY="$YURIRTC_MANIFEST_SIGNING_PRIVATE_KEY" \
       npm run build -w "$POINTER_NAME"
     npm run verify:package -w "$POINTER_NAME"

@@ -146,6 +146,14 @@ func TestBrowserV3EndToEnd(t *testing.T) {
 		t.Fatalf("write cover fixture: %v", err)
 	}
 
+	for _, name := range []string{"filestorage/cache-fixture/tagged.bin", "private.bin"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, name)), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, name), []byte("cache policy fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	const (
 		uploadChunks     = 64
 		uploadChunkBytes = 64 * 1024
@@ -215,7 +223,9 @@ try {
       image.onerror = () => reject(new Error("cover image failed to load"));
       image.src = coverUrl;
     });
+    const imageStarted = performance.now();
     await loadCover();
+    result.dataset.imageColdMs = String(performance.now() - imageStarted);
     for (let attempt = 0; attempt < 300; attempt += 1) {
       if (await caches.match(coverUrl)) break;
       if (attempt === 299) throw new Error("cover image was not committed to persistent cache");
@@ -225,7 +235,9 @@ try {
     if (!removeCover.ok) throw new Error("cover removal status " + removeCover.status);
     // With the source absent, success proves this second browser image request
     // used CacheStorage rather than re-fetching it over YuriRTC.
+    const warmImageStarted = performance.now();
     await loadCover();
+    result.dataset.imageWarmMs = String(performance.now() - warmImageStarted);
     const restoreCover = await fetch("/apiv2/restore-cover-fixture", { method: "POST" });
     if (!restoreCover.ok) throw new Error("cover restore status " + restoreCover.status);
     const mutableUrl = new URL("/mutable.txt", location.href).href;
@@ -260,6 +272,32 @@ try {
     }
     const unchanged = await fetch(mutableUrl, { cache: "no-cache" }).then((response) => response.text());
     if (unchanged !== updated) throw new Error("304 cache reuse changed the body");
+    await fetch("/apiv2/session-login", { method: "POST" });
+    const sessionEcho = await fetch("/apiv2/session-echo").then(response => response.text());
+    if (!sessionEcho.includes("sid=e2e")) throw new Error("session cookie missing");
+    const anonymousEcho = await fetch("/apiv2/session-echo", { credentials: "omit" }).then(response => response.text());
+    if (anonymousEcho) throw new Error("credentials omit leaked session cookie");
+    const cacheMessage = (message) => new Promise((resolve, reject) => {
+      const channel = new MessageChannel();
+      const timer = setTimeout(() => reject(new Error("cache message timeout")), 5000);
+      channel.port1.onmessage = event => { clearTimeout(timer); channel.port1.close(); resolve(event.data); };
+      navigator.serviceWorker.controller.postMessage(message, [channel.port2]);
+    });
+    const taggedUrl = new URL("/filestorage/cache-fixture/tagged.bin", location.href).href;
+    const tagged = await fetch(taggedUrl);
+    if (tagged.headers.get("cache-tag") !== "game:test") throw new Error("missing cache tag");
+    await tagged.text();
+    for (let attempt=0; !(await caches.match(taggedUrl)); attempt++) {
+      if (attempt>300) throw new Error("tagged response not cached");
+      await delay(10);
+    }
+    await fetch("/private.bin").then(response => response.text());
+    if (await caches.match(new URL("/private.bin", location.href).href)) throw new Error("no-store response cached");
+    const invalidated = await cacheMessage({ type: "INVALIDATE_CACHE", tags: ["game:test"] });
+    if (!invalidated.ok || await caches.match(taggedUrl)) throw new Error("tag invalidation failed");
+    if (!(await caches.match(mutableUrl))) throw new Error("tag invalidation cleared unrelated entry");
+    const cleared = await cacheMessage({ type: "CLEAR_CACHE" });
+    if (cleared !== "CLEARED" || await caches.match(mutableUrl)) throw new Error("unified CLEAR_CACHE failed");
     localStorage.setItem("yurirtc-cache-e2e", "complete");
     const finishCacheCheck = harnessGate("yurirtc-cache-e2e-finish");
     result.dataset.phase = "cache-complete";
@@ -398,6 +436,15 @@ try {
 		return uploadGate
 	}
 	backend := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/session-login" {
+			response.Header().Set("Set-Cookie", "sid=e2e; Path=/; HttpOnly; Secure; SameSite=Lax")
+			response.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if request.URL.Path == "/session-echo" {
+			_, _ = response.Write([]byte(request.Header.Get("Cookie")))
+			return
+		}
 		if request.URL.Path == "/remove-cover-fixture" && request.Method == http.MethodPost {
 			if err := os.Remove(coverPath); err != nil && !os.IsNotExist(err) {
 				http.Error(response, "remove cover fixture", http.StatusInternalServerError)
@@ -525,6 +572,18 @@ try {
 	registry := newPeerRegistry()
 	defer registry.CloseAll()
 	handler := NewHandler(root, backend.URL)
+	sidecars := t.TempDir()
+	if err := GeneratePrecompressed(root, sidecars); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.LoadPrecompressed(sidecars); err != nil {
+		t.Fatal(err)
+	}
+	handler.cacheRules = []CacheRule{
+		{Prefix: "/filestorage/logn/", CacheControl: "public, max-age=3600", Tags: []string{"images"}},
+		{Prefix: "/filestorage/cache-fixture/tagged.bin", Cache: "cache", CacheControl: "public, max-age=3600", Tags: []string{"game:test"}},
+		{Prefix: "/private.bin", Cache: "no-store"},
+	}
 
 	var signalMu sync.Mutex
 	signalProtocol := ""

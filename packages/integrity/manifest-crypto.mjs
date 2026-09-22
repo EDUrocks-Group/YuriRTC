@@ -1,3 +1,5 @@
+import { packageUrls } from "../protocol/src/cdn.ts";
+
 import {
   createPrivateKey,
   createPublicKey,
@@ -20,7 +22,7 @@ export function fromBase64url(value, label = "value") {
 }
 
 export function loaderDescriptor(version, sha256) {
-  if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
     throw new Error(`invalid loader version ${version}`);
   }
   if (!/^[A-Za-z0-9_-]{43}$/.test(sha256)) {
@@ -29,10 +31,7 @@ export function loaderDescriptor(version, sha256) {
   return {
     package: "@advwebrec/grainloading",
     version,
-    urls: [
-      `https://cdn.jsdelivr.net/npm/@advwebrec/grainloading@${version}/dist/bundle/client.js`,
-      `https://unpkg.com/@advwebrec/grainloading@${version}/dist/bundle/client.js`
-    ],
+    urls: packageUrls("@advwebrec/grainloading", version, "dist/bundle/client.js"),
     sha256
   };
 }

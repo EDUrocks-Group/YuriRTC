@@ -211,10 +211,20 @@ func (s *Signaler) watchRTDB(ctx context.Context) {
 
 func (s *Signaler) handleRTDBOffer(ctx context.Context, event RTDBOfferEvent) {
 	uid := event.UID
-	removeRTDB := func() {
-		_ = s.rtdb.NewRef("signal/" + uid).Delete(context.Background())
+	branch := "signal/" + uid
+	if event.Session != "" {
+		branch += "/sessions/" + event.Session
 	}
-	cleanupKey := "rtdb:" + uid
+	removeRTDB := func() {
+		if event.Session == "" {
+			// Old clients share the UID root with upgraded tabs. Never delete
+			// the new sessions subtree while cleaning up a legacy exchange.
+			_ = s.rtdb.NewRef(branch).Update(context.Background(), map[string]interface{}{"offer": nil, "answer": nil})
+		} else {
+			_ = s.rtdb.NewRef(branch).Delete(context.Background())
+		}
+	}
+	cleanupKey := "rtdb:" + branch
 	discardRTDB := func() {
 		s.scheduleCleanup(cleanupKey, 0, removeRTDB)
 	}
@@ -223,7 +233,7 @@ func (s *Signaler) handleRTDBOffer(ctx context.Context, event RTDBOfferEvent) {
 	// cleanup reads, while a client which disappears is still reaped promptly.
 	s.scheduleCleanup(cleanupKey, time.Minute, removeRTDB)
 	go s.handle(ctx, "rtdb", event.Offer, func(answer AnswerBlob) error {
-		if err := s.rtdb.NewRef("signal/"+uid+"/answer").Set(ctx, answer); err != nil {
+		if err := s.rtdb.NewRef(branch+"/answer").Set(ctx, answer); err != nil {
 			return err
 		}
 		// Delete after answering. Abandoned offers are small but they

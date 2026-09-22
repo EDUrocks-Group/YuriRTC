@@ -95,6 +95,10 @@ mkdir -p build
 (cd content-node && go build -trimpath -o ../build/yurirtc-content-node .)
 ```
 
+Build from the complete checkout: the local Pion SCTP, DTLS, and transport
+replacements are required. For optional offline gzip sidecars and rotating
+certificate behavior, see [CPU-efficient delivery](CACHE-AND-CDNS.md#cpu-efficient-delivery-and-offline-compression).
+
 Configure it with YuriRTC environment names:
 
 ```ini
@@ -215,8 +219,11 @@ release with the same guarded command on every pass:
 1. The first pass stages `@advwebrec/grainloading` and stops. Review and approve
    the staged loader on the npmjs.com website with the required human 2FA
    challenge.
-2. Run the command again. It recognizes the published loader, verifies its
-   registry tarball and both immutable CDN copies, regenerates and verifies the
+2. Upgrade and verify every active carrier before changing the pointer: older
+   carriers reject the new five-source signed list. Add
+   `YURIRTC_CARRIER_UPGRADE_OK=1` to the guarded command only after this check.
+   Run the command again. It recognizes the published loader, verifies its
+   registry tarball and all five immutable CDN copies, regenerates and verifies the
    signed pointer, stages `shaintloadingcheckpak`, and stops. Review and approve
    that stage on the npmjs.com website with 2FA.
 3. Run the command a final time. It recognizes both published versions,
@@ -302,7 +309,7 @@ Confirm:
 11. The application frame loads, signs in, makes API calls, opens chat/event streams, and loads static assets.
 12. Navigation, Back, Forward, refresh, forms, programmatic fetch/XHR, dynamic image/script URLs, and application history stay inside the virtual deployment root.
 13. No same-origin application request reaches an object-store root and returns an XML error page.
-14. Blocking either npm CDN independently still permits the other configured source to load.
+14. Blocking each loader CDN independently still permits the next configured source to load (UNPKG, jsDelivr, esm.sh raw, unpkg.toolforge.org, then s4.zstatic.net).
 15. Visible loader copy renders correctly through the versioned font without a plaintext/ciphertext flash.
 16. A forced transport loss shows the disconnected view, retries with bounded jitter, and restores only the contained application; blocking every route shows the unavailable view and its manual retry remains functional.
 
@@ -362,7 +369,7 @@ A wire-version transition uses this order:
 1. Deploy the backward-compatible transition content node and verify its service health.
 2. Deploy and verify Firebase rules/indexes.
 3. Publish the loader that speaks the new wire.
-4. Confirm both CDNs serve that immutable version, then publish the signed pointer package.
+4. Confirm all five runtime CDNs serve that immutable version, then publish the signed pointer package.
 5. Upload `index.html` and `sw.js` together.
 6. Complete clean-profile and upgrade-profile validation.
 7. Run the real Firebase/CDN production canary.
@@ -375,7 +382,7 @@ node compatible with the candidate loader has passed its health and matching
 wire canaries. A deployed same-wire node satisfies that gate for same-wire
 loader releases; a protocol change requires its transition node first. The
 script then stages the loader and pauses for npmjs.com website 2FA approval. Reusing
-the same guarded command after approval verifies both immutable CDN copies,
+the same guarded command after approval verifies all five immutable CDN copies,
 stages the pointer, and pauses for its own website 2FA approval; a final rerun
 verifies the published pointer and completes. It does not publish a carrier.
 

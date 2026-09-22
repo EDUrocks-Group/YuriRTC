@@ -1200,35 +1200,41 @@ loop:
 		rawPackets, ok := a.gatherOutbound()
 
 		writeFailed := false
-		for packetIndex, raw := range rawPackets {
-			isAbortPacket := len(raw) > int(commonHeaderSize) && raw[commonHeaderSize] == byte(ctAbort)
-			_, err := a.netConn.Write(raw)
-			if isAbortPacket {
-				a.abortSentOnce.Do(func() { close(a.abortSentCh) })
+		for packetIndex := 0; packetIndex < len(rawPackets); {
+			count := 1
+			var err error
+			if writer, supportsBatch := a.netConn.(interface{ WriteBatch([][]byte) error }); supportsBatch && len(rawPackets)-packetIndex > 1 {
+				count = min(8, len(rawPackets)-packetIndex)
+				err = writer.WriteBatch(rawPackets[packetIndex : packetIndex+count])
+			} else {
+				_, err = a.netConn.Write(rawPackets[packetIndex])
 			}
-			rawLength := len(raw)
-			releasePacketBuffer(raw)
-			rawPackets[packetIndex] = nil
+			for _, raw := range rawPackets[packetIndex : packetIndex+count] {
+				if len(raw) > int(commonHeaderSize) && raw[commonHeaderSize] == byte(ctAbort) {
+					a.abortSentOnce.Do(func() { close(a.abortSentCh) })
+				}
+				if err == nil {
+					atomic.AddUint64(&a.bytesSent, uint64(len(raw)))
+					a.stats.incPacketsSent()
+				}
+				releasePacketBuffer(raw)
+			}
+			clear(rawPackets[packetIndex : packetIndex+count])
+			packetIndex += count
 			if err != nil {
-				for _, unsent := range rawPackets[packetIndex+1:] {
+				for _, unsent := range rawPackets[packetIndex:] {
 					releasePacketBuffer(unsent)
 				}
 				if !errors.Is(err, io.EOF) {
 					a.log.Warnf("[%s] failed to write packets on netConn: %v", a.name, err)
 				}
 				a.log.Debugf("[%s] writeLoop ended", a.name)
-
-				// A write failure may be one-sided, leaving readLoop blocked in
-				// Read. Close the transport so association teardown can finish.
 				_ = a.closeNetConn()
-
 				writeFailed = true
-
 				break
 			}
-			atomic.AddUint64(&a.bytesSent, uint64(rawLength))
-			a.stats.incPacketsSent()
 		}
+
 		if writeFailed {
 			break loop
 		}

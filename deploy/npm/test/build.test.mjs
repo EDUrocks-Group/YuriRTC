@@ -75,8 +75,8 @@ test("release build emits opaque, syntactically valid, signed-pointer carrier fi
     assert.ok(attempted.every((url) =>
       url.endsWith("/@advwebrec/grainloading@0.5.1/dist/bundle/sw.js")
     ));
-    assert.ok(attempted[0].startsWith("https://cdn.jsdelivr.net/"), attempted[0]);
-    assert.ok(attempted[1].startsWith("https://unpkg.com/"), attempted[1]);
+    assert.ok(attempted[0].startsWith("https://unpkg.com/"), attempted[0]);
+    assert.ok(attempted[1].startsWith("https://cdn.jsdelivr.net/"), attempted[1]);
 
     const verified = spawnSync(
       "node",

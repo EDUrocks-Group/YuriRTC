@@ -1,0 +1,160 @@
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
+package netctx
+
+import (
+	"context"
+	"io"
+	"net"
+	"sync"
+	"time"
+)
+
+// ReaderFrom is an interface for context controlled packet reader.
+type ReaderFrom interface {
+	ReadFromContext(context.Context, []byte) (int, net.Addr, error)
+}
+
+// WriterTo is an interface for context controlled packet writer.
+type WriterTo interface {
+	WriteToContext(context.Context, []byte, net.Addr) (int, error)
+}
+
+// PacketConn is a wrapper of net.PacketConn using context.Context.
+type PacketConn interface {
+	ReaderFrom
+	WriterTo
+	io.Closer
+	LocalAddr() net.Addr
+	Conn() net.PacketConn
+}
+
+type packetConn struct {
+	nextConn  net.PacketConn
+	closed    chan struct{}
+	closeOnce sync.Once
+	readMu    sync.Mutex
+	writeMu   sync.Mutex
+}
+
+// NewPacketConn creates a new PacketConn wrapping the given net.PacketConn.
+func NewPacketConn(pconn net.PacketConn) PacketConn {
+	p := &packetConn{
+		nextConn: pconn,
+		closed:   make(chan struct{}),
+	}
+
+	return p
+}
+
+// ReadFromContext reads a packet from the connection,
+// copying the payload into p. It returns the number of
+// bytes copied into p and the return address that
+// was on the packet.
+// It returns the number of bytes read (0 <= n <= len(p))
+// and any error encountered. Callers should always process
+// the n > 0 bytes returned before considering the error err.
+// Unlike net.PacketConn.ReadFrom(), the provided context is
+// used to control timeout.
+func (p *packetConn) ReadFromContext(ctx context.Context, b []byte) (int, net.Addr, error) { //nolint:cyclop
+	p.readMu.Lock()
+	defer p.readMu.Unlock()
+
+	select {
+	case <-p.closed:
+		return 0, nil, net.ErrClosed
+	default:
+	}
+
+	// A cancelable context registers a callback without starting a goroutine
+	// for every packet. Wait for a racing callback before restoring the shared
+	// socket deadline, so cancellation cannot poison the next operation.
+	finished := make(chan struct{})
+	var errSetDeadline error
+	stop := context.AfterFunc(ctx, func() {
+		errSetDeadline = p.nextConn.SetReadDeadline(veryOld)
+		close(finished)
+	})
+	n, raddr, err := p.nextConn.ReadFrom(b)
+	if !stop() {
+		<-finished
+		if errSetDeadline == nil {
+			errSetDeadline = p.nextConn.SetReadDeadline(time.Time{})
+		}
+	}
+	if e := ctx.Err(); e != nil && n == 0 {
+		err = e
+	}
+	if errSetDeadline != nil && err == nil {
+		err = errSetDeadline
+	}
+
+	return n, raddr, err
+}
+
+// WriteToContext writes a packet with payload p to addr.
+// Unlike net.PacketConn.WriteTo(), the provided context
+// is used to control timeout.
+// On packet-oriented connections, write timeouts are rare.
+func (p *packetConn) WriteToContext(ctx context.Context, b []byte, raddr net.Addr) (int, error) { //nolint:cyclop
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+
+	select {
+	case <-p.closed:
+		return 0, ErrClosing
+	default:
+	}
+
+	// A cancelable context registers a callback without starting a goroutine
+	// for every packet. Wait for a racing callback before restoring the shared
+	// socket deadline, so cancellation cannot poison the next operation.
+	finished := make(chan struct{})
+	var errSetDeadline error
+	stop := context.AfterFunc(ctx, func() {
+		errSetDeadline = p.nextConn.SetWriteDeadline(veryOld)
+		close(finished)
+	})
+	n, err := p.nextConn.WriteTo(b, raddr)
+	if !stop() {
+		<-finished
+		if errSetDeadline == nil {
+			errSetDeadline = p.nextConn.SetWriteDeadline(time.Time{})
+		}
+	}
+	if e := ctx.Err(); e != nil && n == 0 {
+		err = e
+	}
+	if errSetDeadline != nil && err == nil {
+		err = errSetDeadline
+	}
+
+	return n, err
+}
+
+// Close closes the connection.
+// Any blocked ReadFromContext or WriteToContext operations will be unblocked
+// and return errors.
+func (p *packetConn) Close() error {
+	err := p.nextConn.Close()
+	p.closeOnce.Do(func() {
+		p.writeMu.Lock()
+		p.readMu.Lock()
+		close(p.closed)
+		p.readMu.Unlock()
+		p.writeMu.Unlock()
+	})
+
+	return err
+}
+
+// LocalAddr returns the local network address, if known.
+func (p *packetConn) LocalAddr() net.Addr {
+	return p.nextConn.LocalAddr()
+}
+
+// Conn returns the underlying net.PacketConn.
+func (p *packetConn) Conn() net.PacketConn {
+	return p.nextConn
+}

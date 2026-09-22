@@ -1,0 +1,1067 @@
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
+package vnet
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/pion/logging"
+	"github.com/pion/transport/v4"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestNetVirtual(t *testing.T) { //nolint:gocyclo,cyclop,maintidx
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+
+	t.Run("tnet.Interfaces", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		intfs, err := nw.Interfaces()
+		assert.Equal(t, 2, len(intfs), "should be one tnet.Interface")
+		assert.NoError(t, err, "should succeed")
+
+		for _, ifc := range intfs {
+			switch ifc.Name {
+			case lo0String:
+				assert.Equal(t, 1, ifc.Index, "Index mismatch")
+				assert.Equal(t, 16384, ifc.MTU, "MTU mismatch")
+				assert.Equal(t,
+					net.HardwareAddr(nil),
+					ifc.HardwareAddr,
+					"HardwareAddr mismatch")
+				assert.Equal(t,
+					net.FlagUp|net.FlagLoopback|net.FlagMulticast,
+					ifc.Flags,
+					"Flags mismatch")
+
+				addrs, err := ifc.Addrs()
+				assert.NoError(t, err, "should succeed")
+				assert.Equal(t, 2, len(addrs), "should have loopback addresses")
+			case "eth0":
+				assert.Equal(t, 2, ifc.Index, "Index mismatch")
+				assert.Equal(t, 1500, ifc.MTU, "MTU mismatch")
+				assert.Equal(t, 6, len(ifc.HardwareAddr), "HardwareAddr length mismatch")
+				assert.Equal(t,
+					net.FlagUp|net.FlagMulticast,
+					ifc.Flags,
+					"Flags mismatch")
+
+				_, err := ifc.Addrs()
+				assert.NotNil(t, err, "should fail")
+			default:
+				assert.Fail(t, "unknown tnet.Interface: %v", ifc.Name)
+			}
+
+			if addrs, err := ifc.Addrs(); err == nil {
+				for _, addr := range addrs {
+					log.Debugf("[%d] %s:%s",
+						ifc.Index,
+						addr.Network(),
+						addr.String())
+				}
+			}
+		}
+	})
+
+	t.Run("tnet.InterfaceByName", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		intfs, err := nw.Interfaces()
+		assert.Equal(t, 2, len(intfs), "should be one tnet.Interface")
+		assert.NoError(t, err, "should succeed")
+
+		var ifc *transport.Interface
+
+		ifc, err = nw.InterfaceByName(lo0String)
+		assert.NoError(t, err, "should succeed")
+		if ifc.Name == lo0String {
+			assert.Equal(t, 1, ifc.Index, "Index mismatch")
+			assert.Equal(t, 16384, ifc.MTU, "MTU mismatch")
+			assert.Equal(t,
+				net.HardwareAddr(nil),
+				ifc.HardwareAddr,
+				"HardwareAddr mismatch")
+			assert.Equal(t,
+				net.FlagUp|net.FlagLoopback|net.FlagMulticast,
+				ifc.Flags,
+				"Flags mismatch")
+
+			addrs, err2 := ifc.Addrs()
+			assert.NoError(t, err2, "should succeed")
+			assert.Equal(t, 2, len(addrs), "should have loopback addresses")
+		}
+
+		ifc, err = nw.InterfaceByName("eth0")
+		assert.NoError(t, err, "should succeed")
+		assert.Equal(t, 2, ifc.Index, "Index mismatch")
+		assert.Equal(t, 1500, ifc.MTU, "MTU mismatch")
+		assert.Equal(t, 6, len(ifc.HardwareAddr), "HardwareAddr length mismatch")
+		assert.Equal(t,
+			net.FlagUp|net.FlagMulticast,
+			ifc.Flags,
+			"Flags mismatch")
+
+		_, err = ifc.Addrs()
+		assert.NotNil(t, err, "should fail")
+
+		_, err = nw.InterfaceByName("foo0")
+		assert.NotNil(t, err, "should fail")
+	})
+
+	t.Run("hasIPAddr", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		intfs, err := nw.Interfaces()
+		assert.Equal(t, 2, len(intfs), "should be one tnet.Interface")
+		assert.NoError(t, err, "should succeed")
+
+		var ifc *transport.Interface
+
+		ifc, err = nw.InterfaceByName("eth0")
+		assert.NoError(t, err, "should succeed")
+		ifc.AddAddress(&net.IPNet{
+			IP:   net.ParseIP("10.1.2.3"),
+			Mask: net.CIDRMask(24, 32),
+		})
+
+		_, err = ifc.Addrs()
+		assert.NoError(t, err, "should succeed")
+
+		assert.True(t, nw.hasIPAddr(net.ParseIP("127.0.0.1")),
+			"the IP addr should exist")
+		assert.True(t, nw.hasIPAddr(net.ParseIP("::1")),
+			"the IP addr should exist")
+		assert.True(t, nw.hasIPAddr(net.IPv6unspecified),
+			"the unspecified IPv6 addr should bind")
+		assert.True(t, nw.hasIPAddr(net.ParseIP("10.1.2.3")),
+			"the IP addr should exist")
+		assert.False(t, nw.hasIPAddr(net.ParseIP("192.168.1.1")),
+			"the IP addr should NOT exist")
+	})
+
+	t.Run("getAllIPAddrs", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		intfs, err := nw.Interfaces()
+		assert.Equal(t, 2, len(intfs), "should be one tnet.Interface")
+		assert.NoError(t, err, "should succeed")
+
+		var ifc *transport.Interface
+
+		ifc, err = nw.InterfaceByName("eth0")
+		assert.NoError(t, err, "should succeed")
+		ifc.AddAddress(&net.IPNet{
+			IP:   net.ParseIP("10.1.2.3"),
+			Mask: net.CIDRMask(24, 32),
+		})
+
+		ips := nw.getAllIPAddrs(false)
+		assert.Equal(t, 2, len(ips), "should match")
+
+		for _, ip := range ips {
+			log.Debugf("ip: %s", ip.String())
+		}
+
+		ips = nw.getAllIPAddrs(true)
+		assert.Equal(t, 1, len(ips), "should match")
+		assert.Equal(t, "::1", ips[0].String(), "should match")
+	})
+
+	t.Run("assignPort()", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		addr := demoIP
+		start := 1000
+		end := 1002
+		space := end + 1 - start
+
+		intfs, err := nw.Interfaces()
+		assert.Equal(t, 2, len(intfs), "should be one tnet.Interface")
+		assert.NoError(t, err, "should succeed")
+
+		var ifc *transport.Interface
+
+		ifc, err = nw.InterfaceByName("eth0")
+		assert.NoError(t, err, "should succeed")
+		ifc.AddAddress(&net.IPNet{
+			IP:   net.ParseIP(addr),
+			Mask: net.CIDRMask(24, 32),
+		})
+
+		// attempt to assign port with start > end should fail
+		_, err = nw.assignPort(net.ParseIP(addr), 3000, 2999)
+		assert.NotNil(t, err, "should fail")
+
+		for i := range space {
+			port, err2 := nw.assignPort(net.ParseIP(addr), start, end)
+			assert.NoError(t, err2, "should succeed")
+			log.Debugf("[%d] got port: %d", i, port)
+
+			conn, err2 := newUDPConn(&net.UDPAddr{
+				IP:   net.ParseIP(addr),
+				Port: port,
+			}, nil, &myConnObserver{})
+			assert.NoError(t, err2, "should succeed")
+			err2 = nw.udpConns.insert(conn)
+			assert.NoError(t, err2, "should succeed")
+		}
+
+		assert.Equal(t, space, nw.udpConns.size(), "should match")
+
+		// attempt to assign again should fail
+		_, err = nw.assignPort(net.ParseIP(addr), start, end)
+		assert.NotNil(t, err, "should fail")
+	})
+
+	t.Run("determineSourceIP()", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		intfs, err := nw.Interfaces()
+		assert.Equal(t, 2, len(intfs), "should be one tnet.Interface")
+		assert.NoError(t, err, "should succeed")
+
+		var ifc *transport.Interface
+
+		ifc, err = nw.InterfaceByName("eth0")
+		assert.NoError(t, err, "should succeed")
+		ifc.AddAddress(&net.IPNet{
+			IP:   net.ParseIP(demoIP),
+			Mask: net.CIDRMask(24, 32),
+		})
+
+		// Any IP turned into non-loopback IP
+		anyIP := net.ParseIP("0.0.0.0")
+		dstIP := net.ParseIP("27.1.7.135")
+		srcIP := nw.determineSourceIP(anyIP, dstIP)
+		log.Debugf("anyIP: %s => %s", anyIP.String(), srcIP.String())
+		assert.NotNil(t, srcIP, "shouldn't be nil")
+		assert.Equal(t, srcIP.String(), demoIP, "use non-loopback IP")
+
+		// Any IP turned into loopback IP
+		anyIP = net.ParseIP("0.0.0.0")
+		dstIP = net.ParseIP("127.0.0.2")
+		srcIP = nw.determineSourceIP(anyIP, dstIP)
+		log.Debugf("anyIP: %s => %s", anyIP.String(), srcIP.String())
+		assert.NotNil(t, srcIP, "shouldn't be nil")
+		assert.Equal(t, srcIP.String(), "127.0.0.1", "use loopback IP")
+
+		// IPv6 any IP turned into IPv6 loopback IP
+		anyIP = net.IPv6unspecified
+		dstIP = net.IPv6loopback
+		srcIP = nw.determineSourceIP(anyIP, dstIP)
+		log.Debugf("anyIP: %s => %s", anyIP.String(), srcIP.String())
+		assert.NotNil(t, srcIP, "shouldn't be nil")
+		assert.Equal(t, "::1", srcIP.String(), "use IPv6 loopback IP")
+
+		// Non any IP won't change
+		anyIP = net.ParseIP(demoIP)
+		dstIP = net.ParseIP("127.0.0.2")
+		srcIP = nw.determineSourceIP(anyIP, dstIP)
+		log.Debugf("anyIP: %s => %s", anyIP.String(), srcIP.String())
+		assert.NotNil(t, srcIP, "shouldn't be nil")
+		assert.True(t, srcIP.Equal(anyIP), "IP change")
+	})
+
+	t.Run("ResolveUDPAddr", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		udpAddr, err := nw.ResolveUDPAddr(udp, "localhost:1234")
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+		assert.Equal(t, "127.0.0.1", udpAddr.IP.String(), "should match")
+		assert.Equal(t, 1234, udpAddr.Port, "should match")
+
+		udpAddr, err = nw.ResolveUDPAddr(udp6, "localhost:1234")
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+		assert.Equal(t, "::1", udpAddr.IP.String(), "should match")
+		assert.Equal(t, 1234, udpAddr.Port, "should match")
+	})
+
+	t.Run("ResolveEmptyAddr", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		wan, err := NewRouter(&RouterConfig{
+			CIDR:          "1.2.3.0/24",
+			LoggerFactory: loggerFactory,
+		})
+		require.NoError(t, err, "should succeed")
+		require.NoError(t, wan.AddNet(nw), "should succeed")
+
+		ipAddr, err := nw.ResolveIPAddr(ip, "")
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+		assert.Equal(t, "0.0.0.0", ipAddr.IP.String(), "should match")
+
+		ipAddr, err = nw.ResolveIPAddr(ip4, "")
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+		assert.Equal(t, "0.0.0.0", ipAddr.IP.String(), "should match")
+
+		ipAddr, err = nw.ResolveIPAddr(ip6, "")
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+		assert.Equal(t, "::", ipAddr.IP.String(), "should match")
+
+		udpAddr, err := nw.ResolveUDPAddr(udp, ":1234")
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+		assert.Equal(t, "0.0.0.0", udpAddr.IP.String(), "should match")
+		assert.Equal(t, 1234, udpAddr.Port, "should match")
+
+		udpAddr, err = nw.ResolveUDPAddr(udp4, ":1234")
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+		assert.Equal(t, "0.0.0.0", udpAddr.IP.String(), "should match")
+		assert.Equal(t, 1234, udpAddr.Port, "should match")
+
+		udpAddr, err = nw.ResolveUDPAddr(udp6, ":1234")
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+		assert.Equal(t, "::", udpAddr.IP.String(), "should match")
+		assert.Equal(t, 1234, udpAddr.Port, "should match")
+	})
+
+	t.Run("UDPLoopback", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		conn, err := nw.ListenPacket(udp, "127.0.0.1:0")
+		assert.NoError(t, err, "should succeed")
+		laddr := conn.LocalAddr()
+		msg := "PING!"
+		n, err := conn.WriteTo([]byte(msg), laddr)
+		assert.NoError(t, err, "should succeed")
+		assert.Equal(t, len(msg), n, "should match")
+
+		buf := make([]byte, 1000)
+		n, addr, err := conn.ReadFrom(buf)
+		assert.NoError(t, err, "should succeed")
+		assert.Equal(t, len(msg), n, "should match")
+		assert.Equal(t, msg, string(buf[:n]), "should match")
+		assert.Equal(t, laddr.(*net.UDPAddr).String(), addr.(*net.UDPAddr).String(), "should match") //nolint:forcetypeassert
+
+		assert.Equal(t, 1, nw.udpConns.size(), "should match")
+		assert.NoError(t, conn.Close(), "should succeed")
+		assert.Empty(t, nw.udpConns.size(), "should match")
+	})
+
+	t.Run("ListenPacket random port", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		conn, err := nw.ListenPacket(udp, "127.0.0.1:0")
+		assert.NoError(t, err, "should succeed")
+
+		laddr := conn.LocalAddr().String()
+		log.Debugf("laddr: %s", laddr)
+
+		assert.Equal(t, 1, nw.udpConns.size(), "should match")
+		assert.NoError(t, conn.Close(), "should succeed")
+		assert.Empty(t, nw.udpConns.size(), "should match")
+	})
+
+	t.Run("ListenPacket specific port", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		conn, err := nw.ListenPacket(udp, "127.0.0.1:50916")
+		assert.NoError(t, err, "should succeed")
+
+		laddr := conn.LocalAddr().String()
+		assert.Equal(t, "127.0.0.1:50916", laddr, "should match")
+
+		assert.Equal(t, 1, nw.udpConns.size(), "should match")
+		assert.NoError(t, conn.Close(), "should succeed")
+		assert.Empty(t, nw.udpConns.size(), "should match")
+	})
+
+	t.Run("ListenUDP random port", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		srcAddr := &net.UDPAddr{
+			IP: net.ParseIP("127.0.0.1"),
+		}
+		conn, err := nw.ListenUDP(udp, srcAddr)
+		assert.NoError(t, err, "should succeed")
+
+		laddr := conn.LocalAddr().String()
+		log.Debugf("laddr: %s", laddr)
+
+		assert.Equal(t, 1, nw.udpConns.size(), "should match")
+		assert.NoError(t, conn.Close(), "should succeed")
+		assert.Empty(t, nw.udpConns.size(), "should match")
+	})
+
+	t.Run("ListenUDP specific port", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		srcAddr := &net.UDPAddr{
+			IP:   net.ParseIP("127.0.0.1"),
+			Port: 60916,
+		}
+		conn, err := nw.ListenUDP(udp, srcAddr)
+		assert.NoError(t, err, "should succeed")
+
+		laddr := conn.LocalAddr().String()
+		assert.Equal(t, "127.0.0.1:60916", laddr, "should match")
+
+		assert.Equal(t, 1, nw.udpConns.size(), "should match")
+		assert.NoError(t, conn.Close(), "should succeed")
+		assert.Empty(t, nw.udpConns.size(), "should match")
+	})
+
+	t.Run("Dial (UDP) lo0", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		conn, err := nw.Dial(udp, "127.0.0.1:1234")
+		assert.NoError(t, err, "should succeed")
+
+		laddr := conn.LocalAddr()
+		log.Debugf("laddr: %s", laddr.String())
+
+		raddr := conn.RemoteAddr()
+		log.Debugf("raddr: %s", raddr.String())
+
+		assert.Equal(t, "127.0.0.1", laddr.(*net.UDPAddr).IP.String(), "should match") //nolint:forcetypeassert
+		assert.True(t, laddr.(*net.UDPAddr).Port != 0, "should match")                 //nolint:forcetypeassert
+		assert.Equal(t, "127.0.0.1:1234", raddr.String(), "should match")
+		assert.Equal(t, 1, nw.udpConns.size(), "should match")
+		assert.NoError(t, conn.Close(), "should succeed")
+		assert.Empty(t, nw.udpConns.size(), "should match")
+	})
+
+	t.Run("Dial (UDP) eth0", func(t *testing.T) {
+		wan, err := NewRouter(&RouterConfig{
+			CIDR:          "1.2.3.0/24",
+			LoggerFactory: loggerFactory,
+		})
+		assert.NoError(t, err, "should succeed")
+
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		assert.NoError(t, wan.AddNet(nw), "should succeed")
+
+		conn, err := nw.Dial(udp, "27.3.4.5:1234")
+		assert.NoError(t, err, "should succeed")
+
+		laddr := conn.LocalAddr()
+		log.Debugf("laddr: %s", laddr.String())
+
+		raddr := conn.RemoteAddr()
+		log.Debugf("raddr: %s", raddr.String())
+
+		assert.Equal(t, "1.2.3.1", laddr.(*net.UDPAddr).IP.String(), "should match") //nolint:forcetypeassert
+		assert.True(t, laddr.(*net.UDPAddr).Port != 0, "should match")               //nolint:forcetypeassert
+		assert.Equal(t, "27.3.4.5:1234", raddr.String(), "should match")
+		assert.Equal(t, 1, nw.udpConns.size(), "should match")
+		assert.NoError(t, conn.Close(), "should succeed")
+		assert.Empty(t, nw.udpConns.size(), "should match")
+	})
+
+	t.Run("DialUDP", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		locAddr := &net.UDPAddr{
+			IP:   net.IPv4(127, 0, 0, 1),
+			Port: 0,
+		}
+
+		remAddr := &net.UDPAddr{
+			IP:   net.IPv4(127, 0, 0, 1),
+			Port: 1234,
+		}
+
+		conn, err := nw.DialUDP(udp, locAddr, remAddr)
+		assert.NoError(t, err, "should succeed")
+
+		laddr := conn.LocalAddr()
+		log.Debugf("laddr: %s", laddr.String())
+
+		raddr := conn.RemoteAddr()
+		log.Debugf("raddr: %s", raddr.String())
+
+		assert.Equal(t, "127.0.0.1", laddr.(*net.UDPAddr).IP.String(), "should match") //nolint:forcetypeassert
+		assert.True(t, laddr.(*net.UDPAddr).Port != 0, "should match")                 //nolint:forcetypeassert
+		assert.Equal(t, "127.0.0.1:1234", raddr.String(), "should match")
+		assert.Equal(t, 1, nw.udpConns.size(), "should match")
+		assert.NoError(t, conn.Close(), "should succeed")
+		assert.Empty(t, nw.udpConns.size(), "should match")
+	})
+
+	t.Run("UDP6", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		require.NoError(t, err, "should succeed")
+
+		packetConn, err := nw.ListenPacket(udp6, ":0")
+		require.NoError(t, err, "should succeed")
+		packetAddr := packetConn.LocalAddr().(*net.UDPAddr) //nolint:forcetypeassert
+		assert.Equal(t, "::", packetAddr.IP.String(), "should match")
+		assert.NoError(t, packetConn.Close(), "should succeed")
+
+		udpConn, err := nw.ListenUDP(udp6, nil)
+		require.NoError(t, err, "should succeed")
+		udpAddr := udpConn.LocalAddr().(*net.UDPAddr) //nolint:forcetypeassert
+		assert.Equal(t, "::", udpAddr.IP.String(), "should match")
+		assert.NoError(t, udpConn.Close(), "should succeed")
+
+		locAddr := &net.UDPAddr{
+			IP: net.IPv6loopback,
+		}
+		remAddr := &net.UDPAddr{
+			IP:   net.IPv6loopback,
+			Port: 1234,
+		}
+		udpConn, err = nw.DialUDP(udp6, locAddr, remAddr)
+		require.NoError(t, err, "should succeed")
+		udpAddr = udpConn.LocalAddr().(*net.UDPAddr) //nolint:forcetypeassert
+		assert.Equal(t, "::1", udpAddr.IP.String(), "should match")
+		assert.NoError(t, udpConn.Close(), "should succeed")
+
+		packetConn, err = nw.ListenPacket(udp6, "[::1]:0")
+		require.NoError(t, err, "should succeed")
+		assert.NoError(t, packetConn.SetReadDeadline(time.Now().Add(time.Second)), "should succeed")
+
+		conn, err := nw.Dial(udp6, packetConn.LocalAddr().String())
+		require.NoError(t, err, "should succeed")
+		localAddr := conn.LocalAddr().(*net.UDPAddr) //nolint:forcetypeassert
+		assert.Equal(t, "::1", localAddr.IP.String(), "should match")
+		assert.Equal(t, packetConn.LocalAddr().String(), conn.RemoteAddr().String(), "should match")
+
+		msg := "PING!"
+		n, err := conn.Write([]byte(msg))
+		assert.NoError(t, err, "should succeed")
+		assert.Equal(t, len(msg), n, "should match")
+
+		buf := make([]byte, 1000)
+		n, addr, err := packetConn.ReadFrom(buf)
+		assert.NoError(t, err, "should succeed")
+		assert.Equal(t, len(msg), n, "should match")
+		assert.Equal(t, msg, string(buf[:n]), "should match")
+		assert.Equal(t, conn.LocalAddr().String(), addr.String(), "should match")
+
+		assert.NoError(t, conn.Close(), "should succeed")
+		assert.NoError(t, packetConn.Close(), "should succeed")
+	})
+
+	t.Run("Resolver", func(t *testing.T) {
+		wan, err := NewRouter(&RouterConfig{
+			CIDR:          "1.2.3.0/24",
+			LoggerFactory: loggerFactory,
+		})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		err = wan.AddHost("test.pion.ly", "30.31.32.33")
+		assert.NoError(t, err, "should succeed")
+
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		assert.NoError(t, wan.AddNet(nw), "should succeed")
+
+		conn, err := nw.Dial(udp, "test.pion.ly:1234")
+		assert.NoError(t, err, "should succeed")
+
+		laddr := conn.LocalAddr()
+		log.Debugf("laddr: %s", laddr.String())
+
+		raddr := conn.RemoteAddr()
+		log.Debugf("raddr: %s", raddr.String())
+
+		assert.Equal(t, "1.2.3.1", laddr.(*net.UDPAddr).IP.String(), "should match") //nolint:forcetypeassert
+		assert.True(t, laddr.(*net.UDPAddr).Port != 0, "should match")               //nolint:forcetypeassert
+		assert.Equal(t, "30.31.32.33:1234", raddr.String(), "should match")
+		assert.Equal(t, 1, nw.udpConns.size(), "should match")
+		assert.NoError(t, conn.Close(), "should succeed")
+		assert.Empty(t, nw.udpConns.size(), "should match")
+	})
+
+	t.Run("Loopback", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		conn, err := nw.ListenPacket(udp, "127.0.0.1:50916")
+		assert.NoError(t, err, "should succeed")
+
+		laddr := conn.LocalAddr()
+		assert.Equal(t, "127.0.0.1:50916", laddr.String(), "should match")
+
+		chunk := newChunkUDP(&net.UDPAddr{
+			IP:   net.ParseIP("127.0.0.1"),
+			Port: 4000,
+		}, &net.UDPAddr{
+			IP:   net.ParseIP("127.0.0.1"),
+			Port: 50916,
+		})
+		chunk.userData = []byte("Hello!")
+
+		var hasReceived bool
+		recvdCh := make(chan bool)
+		doneCh := make(chan struct{})
+
+		go func() {
+			var err error
+			var n int
+			var addr net.Addr
+			buf := make([]byte, 1500)
+			for {
+				n, addr, err = conn.ReadFrom(buf)
+				if err != nil {
+					log.Debugf("ReadFrom returned: %v", err)
+
+					break
+				}
+
+				assert.Equal(t, 6, len(chunk.userData), "should match")
+				assert.Equal(t, "127.0.0.1:4000", addr.String(), "should match")
+				assert.Equal(t, "Hello!", string(buf[:n]), "should match")
+
+				recvdCh <- true
+			}
+
+			close(doneCh)
+		}()
+
+		nw.onInboundChunk(chunk)
+
+	loop:
+		for {
+			select {
+			case <-recvdCh:
+				hasReceived = true
+				assert.NoError(t, conn.Close(), "should succeed")
+			case <-doneCh:
+				break loop
+			}
+		}
+
+		assert.Empty(t, nw.udpConns.size(), "should match")
+		assert.True(t, hasReceived, "should have received data")
+	})
+
+	t.Run("End-to-End", func(t *testing.T) {
+		doneCh := make(chan struct{})
+
+		// WAN
+		wan, err := NewRouter(&RouterConfig{
+			CIDR:          "1.2.3.0/24",
+			LoggerFactory: loggerFactory,
+		})
+		assert.NoError(t, err, "should succeed")
+
+		net1, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		err = wan.AddNet(net1)
+		assert.NoError(t, err, "should succeed")
+		ip1, err := getIPAddr(net1)
+		assert.NoError(t, err, "should succeed")
+
+		net2, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		err = wan.AddNet(net2)
+		assert.NoError(t, err, "should succeed")
+		ip2, err := getIPAddr(net2)
+		assert.NoError(t, err, "should succeed")
+
+		conn1, err := net1.ListenPacket(
+			udp,
+			fmt.Sprintf("%s:%d", ip1, 1234),
+		)
+		assert.NoError(t, err, "should succeed")
+
+		conn2, err := net2.ListenPacket(
+			udp,
+			fmt.Sprintf("%s:%d", ip2, 5678),
+		)
+		assert.NoError(t, err, "should succeed")
+
+		// start the router
+		err = wan.Start()
+		assert.NoError(t, err, "should succeed")
+
+		conn1RcvdCh := make(chan bool)
+
+		// conn1
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				log.Debug("conn1: wait for a message..")
+				n, _, err2 := conn1.ReadFrom(buf)
+				if err2 != nil {
+					log.Debugf("ReadFrom returned: %v", err2)
+
+					break
+				}
+
+				log.Debugf("conn1 received %s", string(buf[:n]))
+				conn1RcvdCh <- true
+			}
+			close(doneCh)
+		}()
+
+		// conn2
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				log.Debug("conn2: wait for a message..")
+				n, addr, err2 := conn2.ReadFrom(buf)
+				if err2 != nil {
+					log.Debugf("ReadFrom returned: %v", err2)
+
+					break
+				}
+
+				log.Debugf("conn2 received %s", string(buf[:n]))
+
+				// echo back to conn1
+				nSent, err2 := conn2.WriteTo([]byte("Good-bye!"), addr)
+				assert.NoError(t, err2, "should succeed")
+				assert.Equal(t, 9, nSent, "should match")
+			}
+		}()
+
+		log.Debug("conn1: sending")
+		nSent, err := conn1.WriteTo(
+			[]byte("Hello!"),
+			conn2.LocalAddr(),
+		)
+		assert.NoError(t, err, "should succeed")
+		assert.Equal(t, 6, nSent, "should match")
+
+	loop:
+		for {
+			select {
+			case <-conn1RcvdCh:
+				assert.NoError(t, conn1.Close(), "should succeed")
+				assert.NoError(t, conn2.Close(), "should succeed")
+			case <-doneCh:
+				break loop
+			}
+		}
+
+		assert.NoError(t, wan.Stop(), "should succeed")
+	})
+
+	t.Run("Dialer", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		dialer := nw.CreateDialer(&net.Dialer{
+			LocalAddr: &net.UDPAddr{
+				IP:   net.ParseIP("127.0.0.1"),
+				Port: 0,
+			},
+		})
+
+		conn, err := dialer.Dial(udp, "127.0.0.1:1234")
+		assert.NoError(t, err, "should succeed")
+
+		laddr := conn.LocalAddr()
+		log.Debugf("laddr: %s", laddr.String())
+
+		raddr := conn.RemoteAddr()
+		log.Debugf("raddr: %s", raddr.String())
+
+		assert.Equal(t, "127.0.0.1", laddr.(*net.UDPAddr).IP.String(), "should match") //nolint:forcetypeassert
+		assert.True(t, laddr.(*net.UDPAddr).Port != 0, "should match")                 //nolint:forcetypeassert
+		assert.Equal(t, "127.0.0.1:1234", raddr.String(), "should match")
+		assert.Equal(t, 1, nw.udpConns.size(), "should match")
+		assert.NoError(t, conn.Close(), "should succeed")
+		assert.Empty(t, nw.udpConns.size(), "should match")
+	})
+
+	t.Run("Listen", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		assert.Nil(t, err, "should succeed")
+
+		listenConfig := nw.CreateListenConfig(&net.ListenConfig{})
+		listener, err := listenConfig.Listen(context.Background(), "tcp4", "127.0.0.1:1234")
+		assert.NoError(t, err, "should succeed")
+
+		laddr := listener.Addr()
+		log.Debugf("laddr: %s", laddr.String())
+
+		conn, err := net.Dial("tcp4", "127.0.0.1:1234") //nolint:noctx
+		assert.NoError(t, err, "should succeed")
+
+		raddr := conn.RemoteAddr()
+		log.Debugf("raddr: %s", raddr.String())
+
+		assert.Equal(t, "127.0.0.1", laddr.(*net.TCPAddr).IP.String(), "should match") //nolint:forcetypeassert
+		assert.True(t, laddr.(*net.TCPAddr).Port != 0, "should match")                 //nolint:forcetypeassert
+		assert.Equal(t, "127.0.0.1:1234", raddr.String(), "should match")
+		assert.NoError(t, conn.Close(), "should succeed")
+		assert.NoError(t, listener.Close(), "should succeed")
+	})
+
+	t.Run("ListenPacket", func(t *testing.T) {
+		nw, err := NewNet(&NetConfig{})
+		assert.Nil(t, err, "should succeed")
+
+		listenConfig := nw.CreateListenConfig(&net.ListenConfig{})
+		packetListener, err := listenConfig.ListenPacket(context.Background(), udp, "127.0.0.1:1234")
+		assert.NoError(t, err, "should succeed")
+
+		laddr := packetListener.LocalAddr()
+		log.Debugf("laddr: %s", laddr.String())
+
+		dialer := nw.CreateDialer(&net.Dialer{
+			LocalAddr: &net.UDPAddr{
+				IP:   net.ParseIP("127.0.0.1"),
+				Port: 0,
+			},
+		})
+
+		packetConn, err := dialer.Dial(udp, "127.0.0.1:1234")
+		assert.NoError(t, err, "should succeed")
+
+		raddr := packetConn.RemoteAddr()
+		log.Debugf("raddr: %s", raddr.String())
+
+		assert.Equal(t, "127.0.0.1", laddr.(*net.UDPAddr).IP.String(), "should match") //nolint:forcetypeassert
+		assert.True(t, laddr.(*net.UDPAddr).Port != 0, "should match")                 //nolint:forcetypeassert
+		assert.Equal(t, "127.0.0.1:1234", raddr.String(), "should match")
+		assert.NoError(t, packetConn.Close(), "should succeed")
+		assert.NoError(t, packetListener.Close(), "should succeed")
+	})
+
+	t.Run("Two IPs on a NIC", func(t *testing.T) {
+		doneCh := make(chan struct{})
+
+		// WAN
+		wan, err := NewRouter(&RouterConfig{
+			CIDR:          "1.2.3.0/24",
+			LoggerFactory: loggerFactory,
+		})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		net1, err := NewNet(&NetConfig{
+			StaticIPs: []string{
+				demoIP,
+				"1.2.3.5",
+			},
+		})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		err = wan.AddNet(net1)
+		assert.NoError(t, err, "should succeed")
+
+		// start the router
+		err = wan.Start()
+		assert.NoError(t, err, "should succeed")
+
+		conn1, err := net1.ListenPacket(udp, "1.2.3.4:1234")
+		assert.NoError(t, err, "should succeed")
+
+		conn2, err := net1.ListenPacket(udp, "1.2.3.5:1234")
+		assert.NoError(t, err, "should succeed")
+
+		conn1RcvdCh := make(chan bool)
+
+		// conn1
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				log.Debug("conn1: wait for a message..")
+				n, _, err2 := conn1.ReadFrom(buf)
+				if err2 != nil {
+					log.Debugf("ReadFrom returned: %v", err2)
+
+					break
+				}
+
+				log.Debugf("conn1 received %s", string(buf[:n]))
+				conn1RcvdCh <- true
+			}
+			close(doneCh)
+		}()
+
+		// conn2
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				log.Debug("conn2: wait for a message..")
+				n, addr, err2 := conn2.ReadFrom(buf)
+				if err2 != nil {
+					log.Debugf("ReadFrom returned: %v", err2)
+
+					break
+				}
+
+				log.Debugf("conn2 received %s", string(buf[:n]))
+
+				// echo back to conn1
+				nSent, err2 := conn2.WriteTo([]byte("Good-bye!"), addr)
+				assert.NoError(t, err2, "should succeed")
+				assert.Equal(t, 9, nSent, "should match")
+			}
+		}()
+
+		log.Debug("conn1: sending")
+		nSent, err := conn1.WriteTo(
+			[]byte("Hello!"),
+			conn2.LocalAddr(),
+		)
+		assert.NoError(t, err, "should succeed")
+		assert.Equal(t, 6, nSent, "should match")
+
+	loop:
+		for {
+			select {
+			case <-conn1RcvdCh:
+				assert.NoError(t, conn1.Close(), "should succeed")
+				assert.NoError(t, conn2.Close(), "should succeed")
+			case <-doneCh:
+				break loop
+			}
+		}
+
+		assert.NoError(t, wan.Stop(), "should succeed")
+	})
+
+	t.Run("AddAddress and RemoveAddress", func(t *testing.T) {
+		router, err := NewRouter(&RouterConfig{
+			CIDR:          "10.0.0.0/24",
+			LoggerFactory: loggerFactory,
+		})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		nw, err := NewNet(&NetConfig{})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		err = router.AddNet(nw)
+		assert.NoError(t, err, "should succeed")
+
+		err = router.Start()
+		assert.NoError(t, err, "should succeed")
+
+		// Add a new address dynamically.
+		newIP := net.ParseIP("10.0.0.100")
+		err = nw.AddAddress("eth0", &net.IPNet{
+			IP:   newIP,
+			Mask: net.CIDRMask(24, 32),
+		})
+		assert.NoError(t, err, "should succeed")
+
+		// Verify address was added to interface.
+		eth0, err := nw.InterfaceByName("eth0")
+		assert.NoError(t, err, "should succeed")
+		addrs, err := eth0.Addrs()
+		assert.NoError(t, err, "should succeed")
+		assert.Equal(t, 2, len(addrs), "should have 2 addresses")
+
+		// Remove the address.
+		err = nw.RemoveAddress("eth0", newIP)
+		assert.NoError(t, err, "should succeed")
+
+		// Verify address was removed.
+		addrs, err = eth0.Addrs()
+		assert.NoError(t, err, "should succeed")
+		assert.Equal(t, 1, len(addrs), "should have 1 address")
+
+		// AddAddress with IP outside CIDR should fail.
+		err = nw.AddAddress("eth0", &net.IPNet{
+			IP:   net.ParseIP("192.168.1.1"),
+			Mask: net.CIDRMask(24, 32),
+		})
+		assert.Error(t, err, "should fail for IP outside CIDR")
+
+		// RemoveAddress with IPAddr type.
+		eth0.AddAddress(&net.IPAddr{IP: net.ParseIP("10.0.0.200")})
+		removed := eth0.RemoveAddress(net.ParseIP("10.0.0.200"))
+		assert.True(t, removed, "should remove IPAddr")
+
+		// RemoveAddress skips unsupported addr types.
+		eth0.AddAddress(&net.TCPAddr{IP: net.ParseIP("10.0.0.201"), Port: 1234})
+		removed = eth0.RemoveAddress(net.ParseIP("10.0.0.201"))
+		assert.False(t, removed, "TCPAddr not supported")
+
+		// RemoveAddress with non-existent IP.
+		removed = eth0.RemoveAddress(net.ParseIP("10.0.0.250"))
+		assert.False(t, removed, "should return false")
+
+		assert.NoError(t, router.Stop(), "should succeed")
+	})
+}

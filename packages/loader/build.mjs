@@ -1,3 +1,4 @@
+import { packageUrls } from "../protocol/src/cdn.ts";
 // Build the browser-facing YuriRTC artifacts published as @advwebrec/grainloading.
 
 import { createHash } from "node:crypto";
@@ -353,10 +354,7 @@ await bundle("src/sw.ts", "iife", "sw.js");
 await bundle("src/index.ts", "esm", "client.js");
 
 const compatibilityPackage = "@advwebrec/grainloading";
-const workerSources = [
-  `https://unpkg.com/${compatibilityPackage}@${version}/dist/bundle/sw.js`,
-  `https://cdn.jsdelivr.net/npm/${compatibilityPackage}@${version}/dist/bundle/sw.js`
-];
+const workerSources = packageUrls(compatibilityPackage, version, "dist/bundle/sw.js");
 const stubSource = `
 var sources=${JSON.stringify(workerSources)};
 var loaded=false;

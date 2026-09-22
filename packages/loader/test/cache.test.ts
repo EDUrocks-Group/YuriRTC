@@ -352,3 +352,10 @@ test("staging cap caches the exact boundary and discards an oversized body", asy
     recorder.restore();
   }
 });
+
+test("origin cache opt-out cannot be overridden by a cacheable route", () => {
+ const request = new Request("https://example.test/cover.png");
+ const response = new Response("private", { headers: { "x-yurirtc-cache": "no-store" } });
+ assert.equal(responseMayBeStored(request,response),false);
+ assert.equal(responseForbidsStoredFallback(response),true);
+});

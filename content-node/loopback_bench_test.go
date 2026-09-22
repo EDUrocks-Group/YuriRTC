@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -161,9 +162,13 @@ func newLoopbackBenchmarkPeer(
 	b.Helper()
 	bindIP := net.IPv4(127, 0, 0, 1)
 	ports := freeDualPorts(b, bindIP, 1)
-	rtc, err := buildTransport(options{
-		bindIP: bindIP.String(), publicIP: bindIP.String(), ports: ports,
-		sctpCC: os.Getenv("YURIRTC_BENCH_SCTP_CC"),
+	var rtc *iceTransport
+	var err error
+	pprof.Do(context.Background(), pprof.Labels("side", "server"), func(context.Context) {
+		rtc, err = buildTransport(options{
+			bindIP: bindIP.String(), publicIP: bindIP.String(), ports: ports,
+			sctpCC: os.Getenv("YURIRTC_BENCH_SCTP_CC"),
+		})
 	})
 	if err != nil {
 		b.Fatalf("build transport: %v", err)
@@ -216,13 +221,20 @@ func newLoopbackBenchmarkPeer(
 	case <-time.After(5 * time.Second):
 		b.Fatal("gather timed out")
 	}
-	answer, err := answerOffer(
-		context.Background(), rtc.API, NewHandler(root, "http://127.0.0.1:1"), registry,
-		OfferBlob{
-			SessionID: fmt.Sprintf("bench-%s-%d", protocol.name, laneCount),
-			SDP:       pc.LocalDescription().SDP,
-		},
-	)
+	var answer AnswerBlob
+	// Descendant server goroutines inherit this label. It lets CPU profiles
+	// distinguish the node from the Pion client in this same-process fixture.
+	// GC workers and runtime work may remain unattributed; heap profiles do not
+	// support these labels and must not be presented as server-only memory.
+	pprof.Do(context.Background(), pprof.Labels("side", "server"), func(ctx context.Context) {
+		answer, err = answerOffer(
+			ctx, rtc.API, NewHandler(root, "http://127.0.0.1:1"), registry,
+			OfferBlob{
+				SessionID: fmt.Sprintf("bench-%s-%d", protocol.name, laneCount),
+				SDP:       pc.LocalDescription().SDP,
+			},
+		)
+	})
 	if err != nil {
 		b.Fatalf("answer: %v", err)
 	}

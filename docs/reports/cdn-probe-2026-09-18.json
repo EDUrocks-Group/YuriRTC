@@ -1,0 +1,111 @@
+{
+  "checkedAt": "2026-09-19T00:58:42.263Z",
+  "version": "0.5.3",
+  "results": [
+    {
+      "file": "dist/bundle/client.js",
+      "probes": [
+        {
+          "url": "https://unpkg.com/@advwebrec/grainloading@0.5.3/dist/bundle/client.js",
+          "status": 200,
+          "bytes": 136580,
+          "sha256": "7b3911aaa727deade7fd8d39d754ee1cad5da137024dd8202ccebd4703b28460"
+        },
+        {
+          "url": "https://cdn.jsdelivr.net/npm/@advwebrec/grainloading@0.5.3/dist/bundle/client.js",
+          "status": 200,
+          "bytes": 136580,
+          "sha256": "7b3911aaa727deade7fd8d39d754ee1cad5da137024dd8202ccebd4703b28460"
+        },
+        {
+          "url": "https://esm.sh/@advwebrec/grainloading@0.5.3/dist/bundle/client.js?raw",
+          "status": 200,
+          "bytes": 136580,
+          "sha256": "7b3911aaa727deade7fd8d39d754ee1cad5da137024dd8202ccebd4703b28460"
+        },
+        {
+          "url": "https://unpkg.toolforge.org/@advwebrec/grainloading@0.5.3/dist/bundle/client.js",
+          "status": 200,
+          "bytes": 136580,
+          "sha256": "7b3911aaa727deade7fd8d39d754ee1cad5da137024dd8202ccebd4703b28460"
+        },
+        {
+          "url": "https://s4.zstatic.net/npm/@advwebrec/grainloading@0.5.3/dist/bundle/client.js",
+          "status": 200,
+          "bytes": 136580,
+          "sha256": "7b3911aaa727deade7fd8d39d754ee1cad5da137024dd8202ccebd4703b28460"
+        }
+      ]
+    },
+    {
+      "file": "dist/bundle/sw.js",
+      "probes": [
+        {
+          "url": "https://unpkg.com/@advwebrec/grainloading@0.5.3/dist/bundle/sw.js",
+          "status": 200,
+          "bytes": 125743,
+          "sha256": "318b016f002eca0c7b2ab2bc0fe09fa9026d060ec71844660e86d6c3651eab07"
+        },
+        {
+          "url": "https://cdn.jsdelivr.net/npm/@advwebrec/grainloading@0.5.3/dist/bundle/sw.js",
+          "status": 200,
+          "bytes": 125743,
+          "sha256": "318b016f002eca0c7b2ab2bc0fe09fa9026d060ec71844660e86d6c3651eab07"
+        },
+        {
+          "url": "https://esm.sh/@advwebrec/grainloading@0.5.3/dist/bundle/sw.js?raw",
+          "status": 200,
+          "bytes": 125743,
+          "sha256": "318b016f002eca0c7b2ab2bc0fe09fa9026d060ec71844660e86d6c3651eab07"
+        },
+        {
+          "url": "https://unpkg.toolforge.org/@advwebrec/grainloading@0.5.3/dist/bundle/sw.js",
+          "status": 200,
+          "bytes": 125743,
+          "sha256": "318b016f002eca0c7b2ab2bc0fe09fa9026d060ec71844660e86d6c3651eab07"
+        },
+        {
+          "url": "https://s4.zstatic.net/npm/@advwebrec/grainloading@0.5.3/dist/bundle/sw.js",
+          "status": 200,
+          "bytes": 125743,
+          "sha256": "318b016f002eca0c7b2ab2bc0fe09fa9026d060ec71844660e86d6c3651eab07"
+        }
+      ]
+    },
+    {
+      "file": "dist/assets/rot13.woff",
+      "probes": [
+        {
+          "url": "https://unpkg.com/@advwebrec/grainloading@0.5.3/dist/assets/rot13.woff",
+          "status": 200,
+          "bytes": 497248,
+          "sha256": "94f4eb3f78b78c6aa70f9c0a9c846a9e0ed430151d35a62aa758aea78a98e2d5"
+        },
+        {
+          "url": "https://cdn.jsdelivr.net/npm/@advwebrec/grainloading@0.5.3/dist/assets/rot13.woff",
+          "status": 200,
+          "bytes": 497248,
+          "sha256": "94f4eb3f78b78c6aa70f9c0a9c846a9e0ed430151d35a62aa758aea78a98e2d5"
+        },
+        {
+          "url": "https://esm.sh/@advwebrec/grainloading@0.5.3/dist/assets/rot13.woff?raw",
+          "status": 200,
+          "bytes": 497248,
+          "sha256": "94f4eb3f78b78c6aa70f9c0a9c846a9e0ed430151d35a62aa758aea78a98e2d5"
+        },
+        {
+          "url": "https://unpkg.toolforge.org/@advwebrec/grainloading@0.5.3/dist/assets/rot13.woff",
+          "status": 200,
+          "bytes": 497248,
+          "sha256": "94f4eb3f78b78c6aa70f9c0a9c846a9e0ed430151d35a62aa758aea78a98e2d5"
+        },
+        {
+          "url": "https://s4.zstatic.net/npm/@advwebrec/grainloading@0.5.3/dist/assets/rot13.woff",
+          "status": 200,
+          "bytes": 497248,
+          "sha256": "94f4eb3f78b78c6aa70f9c0a9c846a9e0ed430151d35a62aa758aea78a98e2d5"
+        }
+      ]
+    }
+  ]
+}

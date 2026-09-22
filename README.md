@@ -143,7 +143,11 @@ https://s3.example-region.amazonaws.com/example-bucket/index.html
 https://static.example.invalid/releases/stable/index.html
 ```
 
-Serve `index.html` as `text/html` and `sw.js` as JavaScript. Both should use `Cache-Control: no-cache` so browsers revalidate releases. The shell fetches `shaintloadingcheckpak@latest/loader.json`, verifies its committed ECDSA P-256 signature, downloads the immutable `@advwebrec/grainloading@VERSION` client from jsDelivr or unpkg, verifies its SHA-256, and only then imports it. The signed client version is also passed to the same-origin worker stub so its worker import is immutable.
+Serve `index.html` as `text/html` and `sw.js` as JavaScript. Both should use `Cache-Control: no-cache` so browsers revalidate releases. The shell fetches `shaintloadingcheckpak@latest/loader.json`, verifies its committed ECDSA P-256 signature, downloads the immutable `@advwebrec/grainloading@VERSION` client from UNPKG, jsDelivr, esm.sh (raw), Toolforge, or ZStatic in that order, verifies its SHA-256, and only then imports it. The signed client version is also passed to the same-origin worker stub so its worker import is immutable.
+
+See [CPU implementation and measurements](docs/reports/2026-09-22-cpu-implementation.md) for bounded compression decisions, verified offline gzip sidecars, rotating certificates, and the DTLS/packet-path optimizations.
+
+See [CDN, cache and session configuration](docs/CACHE-AND-CDNS.md) for the five-source CDN order, per-session RTDB rollout, cache headers/tags, unified-worker invalidation, and memory-only cookie storage.
 
 See [Deployment](docs/DEPLOYMENT.md) for Firebase setup, content-node configuration, publishing, object-store commands, and rollback. See [Compatibility](docs/COMPATIBILITY.md) before changing package names, environment variables, cache identifiers, signaling paths, or service-worker scope behavior.
 

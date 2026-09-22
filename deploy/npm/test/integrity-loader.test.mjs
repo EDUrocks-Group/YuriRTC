@@ -32,7 +32,7 @@ function fetchScenario({ pointers = [manifestText], loaders = [client] } = {}) {
   let pointerIndex = 0;
   let loaderIndex = 0;
   return async (url) => {
-    if (url.endsWith("loader.json")) {
+    if (new URL(url).pathname.endsWith("loader.json")) {
       const value = pointers[pointerIndex++];
       if (value instanceof Error) throw value;
       return response(value, value === undefined ? 404 : 200);
@@ -45,15 +45,7 @@ function fetchScenario({ pointers = [manifestText], loaders = [client] } = {}) {
 
 function release(version, bytes = client) {
   const sha256 = createHash("sha256").update(bytes).digest("base64url");
-  const releaseDescriptor = {
-    package: "@advwebrec/grainloading",
-    version,
-    urls: [
-      `https://cdn.jsdelivr.net/npm/@advwebrec/grainloading@${version}/dist/bundle/client.js`,
-      `https://unpkg.com/@advwebrec/grainloading@${version}/dist/bundle/client.js`
-    ],
-    sha256
-  };
+  const releaseDescriptor = loaderDescriptor(version, sha256);
   return {
     descriptor: releaseDescriptor,
     manifestText: JSON.stringify(signManifest(releaseDescriptor, privateKey))
@@ -128,7 +120,7 @@ test("uses the second manifest CDN and the second matching loader CDN", async ()
     })
   });
   assert.equal(new TextDecoder().decode(result.bytes), new TextDecoder().decode(client));
-  assert.match(result.url, /^https:\/\/unpkg\.com\//);
+  assert.match(result.url, /^https:\/\/cdn\.jsdelivr\.net\//);
 });
 
 test("distinguishes total CDN failure from downloaded hash mismatches", async () => {
@@ -192,7 +184,7 @@ test("a never-resolving manifest fetch is aborted before using the fallback CDN"
     cryptoApi: webcrypto,
     ...shortAttempt,
     fetchImpl: async (url, options) => {
-      if (!url.endsWith("loader.json")) return response(client);
+      if (!new URL(url).pathname.endsWith("loader.json")) return response(client);
       pointerAttempts += 1;
       if (pointerAttempts === 1) {
         options.signal.addEventListener("abort", () => {
@@ -224,7 +216,7 @@ test("a never-resolving loader body is cancelled before using the fallback CDN",
     cryptoApi: webcrypto,
     ...shortAttempt,
     fetchImpl: async (url) => {
-      if (url.endsWith("loader.json")) return response(manifestText);
+      if (new URL(url).pathname.endsWith("loader.json")) return response(manifestText);
       loaderAttempts += 1;
       return loaderAttempts === 1 ? response(stalledBody) : response(client);
     }
@@ -241,7 +233,7 @@ test("chunked manifest and loader bodies are cancelled as soon as they exceed th
     publicKeySpki: spki,
     cryptoApi: webcrypto,
     fetchImpl: async (url) => {
-      if (!url.endsWith("loader.json")) return response(client);
+      if (!new URL(url).pathname.endsWith("loader.json")) return response(client);
       manifestAttempts += 1;
       if (manifestAttempts === 1) {
         return chunkedResponse(
@@ -264,7 +256,7 @@ test("chunked manifest and loader bodies are cancelled as soon as they exceed th
     publicKeySpki: spki,
     cryptoApi: webcrypto,
     fetchImpl: async (url) => {
-      if (url.endsWith("loader.json")) return response(manifestText);
+      if (new URL(url).pathname.endsWith("loader.json")) return response(manifestText);
       loaderAttempts += 1;
       if (loaderAttempts === 1) {
         return chunkedResponse(
@@ -301,7 +293,7 @@ test("a verified newer loader blocks a later signed rollback without downloading
       cryptoApi: webcrypto,
       versionStore: store,
       fetchImpl: async (url) => {
-        if (url.endsWith("loader.json")) return response(older.manifestText);
+        if (new URL(url).pathname.endsWith("loader.json")) return response(older.manifestText);
         loaderRequests += 1;
         return response(client);
       }
@@ -390,4 +382,12 @@ test("loader resolution remains available when version storage throws", async ()
     fetchImpl: fetchScenario()
   });
   assert.deepEqual(result.bytes, client);
+});
+
+test("a signed legacy pointer safely expands to the five immutable mirrors", async () => {
+  const legacy = { ...descriptor, urls: [descriptor.urls[1], descriptor.urls[0]] };
+  const text = JSON.stringify(signManifest(legacy, privateKey));
+  const verified = await verifyEnvelope(text, spki, webcrypto);
+  assert.equal(verified.verified, true);
+  assert.deepEqual(verified.descriptor.urls, descriptor.urls);
 });

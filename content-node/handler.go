@@ -54,8 +54,10 @@ var sseBufferPool = sync.Pool{
 }
 
 type Handler struct {
-	Root       string // dist/
-	BackendURL string // http://127.0.0.1:1801
+	precompressed *precompressedAssets
+	cacheRules    []CacheRule
+	Root          string // dist/
+	BackendURL    string // http://127.0.0.1:1801
 	// WebSocketURL is the one upstream a carried websocket may reach, e.g.
 	// ws://127.0.0.1:1802. Empty disables websockets entirely, which is the
 	// right default: a node that does not need to carry one should not be able
@@ -193,16 +195,15 @@ func (h *Handler) static(ctx context.Context, out responseSender, id uint32, hea
 	representationType := contentType(full)
 	etag := staticETag(info)
 	lastModified := info.ModTime().UTC().Format(http.TimeFormat)
-	cacheControl := staticCacheControl(urlPath)
+	cacheHeaders := h.staticCacheHeaders(urlPath)
 	baseHeaders := func() HeaderPairs {
-		return HeaderPairs{
+		return append(HeaderPairs{
 			{"content-type", representationType},
 			{"accept-ranges", "bytes"},
 			{"date", time.Now().UTC().Format(http.TimeFormat)},
 			{"etag", etag},
 			{"last-modified", lastModified},
-			{"cache-control", cacheControl},
-		}
+		}, cacheHeaders...)
 	}
 
 	// RFC 9110 gives If-None-Match precedence over If-Modified-Since. Apply
@@ -240,6 +241,8 @@ func (h *Handler) static(ctx context.Context, out responseSender, id uint32, hea
 
 	length := end - start + 1
 	wireGzip := false
+	var precompressed *os.File
+	var precompressedBytes int64
 	var compressed []byte
 	if head.Method != http.MethodHead && length >= bulkResponseThreshold {
 		if limiter, ok := out.(bulkResponseLimiter); ok {
@@ -286,8 +289,15 @@ func (h *Handler) static(ctx context.Context, out responseSender, id uint32, hea
 		wireGzip = status == http.StatusOK &&
 			acceptsWireGzip(head.Headers) &&
 			!requestCacheControlHasDirective(head.Headers, "no-transform") &&
+			!cacheControlHasDirective(headerValue(cacheHeaders, "cache-control"), "no-transform") &&
 			isWireGzipType(representationType) && length >= minWireGzipBytes
-		if wireGzip && h.wireGzip != nil && length <= maxWireGzipCacheSourceBytes {
+		if wireGzip {
+			precompressed, precompressedBytes = h.openPrecompressed(full, info)
+			if precompressed != nil {
+				defer precompressed.Close()
+			}
+		}
+		if wireGzip && precompressed == nil && h.wireGzip != nil && length <= maxWireGzipCacheSourceBytes {
 			key := wireGzipCacheKey{path: full, size: size, modTimeNS: info.ModTime().UnixNano()}
 			compressed, wireGzip, err = h.wireGzip.load(ctx, key, func() ([]byte, bool, error) {
 				return compressWireGzip(file, length)
@@ -315,6 +325,18 @@ func (h *Handler) static(ctx context.Context, out responseSender, id uint32, hea
 		return err
 	}
 	if head.Method == http.MethodHead {
+		return out.SendEnd(id)
+	}
+	if precompressed != nil {
+		var err error
+		if direct, ok := out.(directResponseStreamer); ok {
+			err = direct.StreamBody(ctx, id, precompressed, precompressedBytes)
+		} else {
+			err = streamN(ctx, out, id, precompressed, precompressedBytes)
+		}
+		if err != nil {
+			return err
+		}
 		return out.SendEnd(id)
 	}
 	if len(compressed) > 0 {

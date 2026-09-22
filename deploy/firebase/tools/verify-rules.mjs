@@ -39,16 +39,17 @@ try {
 const offer = JSON.stringify({ sessionId: "verify-" + Date.now(), sdp: "v=0\r\n", candidates: [] });
 
 // --- RTDB: per-uid isolation -----------------------------------------------
+const session = [...crypto.getRandomValues(new Uint8Array(16))].map(x => x.toString(16).padStart(2, "0")).join("");
 const rtdb = (path, token, init = {}) =>
   fetch(`${DB}/${path}.json?auth=${encodeURIComponent(token)}`, init);
 
 check(
-  (await rtdb(`signal/${a.localId}/offer`, a.idToken, { method: "PUT", body: offer })).ok,
+  (await rtdb(`signal/${a.localId}/sessions/${session}/offer`, a.idToken, { method: "PUT", body: offer })).ok,
   "RTDB: client can write its own offer"
 );
 
 check(
-  !(await rtdb(`signal/${b.localId}/offer`, a.idToken, { method: "PUT", body: offer })).ok,
+  !(await rtdb(`signal/${b.localId}/sessions/${session}/offer`, a.idToken, { method: "PUT", body: offer })).ok,
   "RTDB: client CANNOT write another client's branch"
 );
 
@@ -60,12 +61,12 @@ check(
 check(!(await rtdb("signal", a.idToken)).ok, "RTDB: tree root is not enumerable");
 
 check(
-  !(await rtdb(`signal/${a.localId}/answer`, a.idToken, { method: "PUT", body: '{"sdp":"forged"}' })).ok,
+  !(await rtdb(`signal/${a.localId}/sessions/${session}/answer`, a.idToken, { method: "PUT", body: '{"sdp":"forged"}' })).ok,
   "RTDB: client CANNOT forge an answer"
 );
 
 check(
-  !(await rtdb(`signal/${a.localId}/offer`, a.idToken, {
+  !(await rtdb(`signal/${a.localId}/sessions/${session}/offer`, a.idToken, {
     method: "PUT",
     body: JSON.stringify({ sessionId: "abuse", sdp: "v=0", candidates: "x".repeat(20000) })
   })).ok,
@@ -73,7 +74,7 @@ check(
 );
 
 check(
-  !(await rtdb(`signal/${a.localId}/offer`, a.idToken, {
+  !(await rtdb(`signal/${a.localId}/sessions/${session}/offer`, a.idToken, {
     method: "PUT",
     body: JSON.stringify({ sessionId: "abuse", sdp: "v=0", unexpected: "x" })
   })).ok,

@@ -722,7 +722,7 @@ test("carrier handles loader CDN and integrity failures before execution", { tim
         assert.equal(display.body, "Loader code via CDN blocker or not available, please email allhands@edurocks.org for further help");
         assert.equal(display.retry, "Retry");
         assert.equal(display.shadow, "none");
-        assert.equal(seen.manifest, 2);
+        assert.equal(seen.manifest, 5);
         assert.equal(seen.loader, 0);
         assert.equal(seen.icons, 1);
       } finally {
@@ -734,7 +734,7 @@ test("carrier handles loader CDN and integrity failures before execution", { tim
       const { context, page, seen } = await scenario("signature");
       try {
         await page.waitForSelector('[data-yurirtc-loader-error="integrity"]');
-        assert.equal(seen.manifest, 2);
+        assert.equal(seen.manifest, 5);
         assert.equal(seen.loader, 0);
       } finally {
         await context.close();
@@ -760,7 +760,7 @@ test("carrier handles loader CDN and integrity failures before execution", { tim
         await page.waitForFunction(() => !document.querySelector("[data-yurirtc-loader-continue]")?.disabled);
         await page.locator("[data-yurirtc-loader-continue]").click();
         await page.waitForFunction(() => typeof window.__YURIRTC_E2E_CONTINUE__ === "function");
-        assert.equal(seen.loader, 2, "both mismatching CDN copies must be checked before warning");
+        assert.equal(seen.loader, 5, "all mismatching CDN copies must be checked before warning");
       } finally {
         await context.close();
       }

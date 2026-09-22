@@ -32,3 +32,11 @@ Pion tag, reapply only the changes above, and run:
 ```
 
 The upstream MIT license and notices are retained in this directory.
+
+The September 2026 CPU update also detects the optional synchronous
+`WriteBatch([][]byte) error` connection method. Already-ready outbound packets
+are submitted in groups of at most eight, without a fill timer or extra queue.
+Older net.Conn implementations retain the original per-packet path. Ownership
+remains synchronous; any batch error terminates the association and all pooled
+buffers are released. Stats count successful complete batches only. The DTLS
+fork preserves record/datagram boundaries and its existing MTU limit.

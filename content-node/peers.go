@@ -22,7 +22,8 @@ var errHandshakeCapacity = errors.New("WebRTC handshake capacity temporarily exh
 // observability. Logging every state transition becomes its own bottleneck
 // during a reconnect burst, while one aggregate line per minute stays useful.
 type peerRegistry struct {
-	mu sync.Mutex
+	certificates certificateCache
+	mu           sync.Mutex
 
 	peers              map[*webrtc.PeerConnection]bool // value is whether it connected
 	connected          int
